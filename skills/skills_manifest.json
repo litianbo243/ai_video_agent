@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "skills": [
+    {
+      "name": "epub_to_txt",
+      "entry": "skills.epub_to_txt.logic:epub_to_txt",
+      "deterministic": true,
+      "io": "file -> file",
+      "description": "Convert an .epub file into a UTF-8 .txt preserving spine chapter order. Stdlib only.",
+      "doc": "skills/epub_to_txt/readme.md"
+    },
+    {
+      "name": "batch_chapters",
+      "entry": "skills.batch_chapters.logic:batch_chapters_by_chars",
+      "deterministic": true,
+      "io": "list[Chapter] -> list[Batch]",
+      "description": "Pack a Chinese novel's chapters into LLM-sized batches by character budget; never splits mid-chapter.",
+      "doc": "skills/batch_chapters/readme.md"
+    },
+    {
+      "name": "file_io",
+      "entry": "skills.file_io.logic",
+      "deterministic": true,
+      "io": "mixed",
+      "description": "Read source .txt and write FinalReport (json+md) plus per-batch checkpoints.",
+      "doc": "skills/file_io/readme.md"
+    }
+  ]
+}

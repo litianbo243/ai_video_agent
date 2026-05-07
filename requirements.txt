@@ -1,0 +1,4 @@
+langgraph>=1.0,<2.0
+pydantic>=2.6,<3.0
+openai>=1.40
+anthropic>=0.34
