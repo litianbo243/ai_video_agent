@@ -1,4 +1,4 @@
-# ai_video
+# ai_video_agent
 
 把一本中文小说(`.txt` 或 `.epub`)拆解成可直接驱动 AI 短视频生产的**剧本 / 人物 / 场景**结构化数据,JSON + Markdown 双格式同时输出。底层用 LangGraph 编排;LLM 接任意 OpenAI 兼容端点(云上 / 本地 / 自建网关)。
 
@@ -48,7 +48,7 @@ write (skill: file_io)
 ## 项目结构
 
 ```
-ai_video/
+ai_video_agent/
 ├── agents/
 │   └── novel_analysis/                  # 小说分析 agent(未来:image_generation/ video_generation/ ...)
 │       ├── manager.py                   # 顶层协调者
