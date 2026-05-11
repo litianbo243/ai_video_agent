@@ -1,17 +1,16 @@
-"""子-agent:人物抽取。
+"""单批人物抽取:一次 LLM 调用,返回本批增量。
 
-从单批章节正文里提取人物(新增 / 补充)。每批一次 LLM 调用。
-合并语义见 ``BatchState.merge_characters``:同名融合(aliases 取并集,
-appearance / personality 非空才覆盖),新名新增。
+合并(同名融合、新增赋 index)放在 ``manager.py``,这里只负责 prompt + LLM 调用。
 """
 
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Dict, List
 
 from llm.client import LLMClient
-from schema.novel_analysis import Batch, BatchState, CharacterExtraction
+from skills.batch_chapters import Batch
+from skills.extract_characters.schema import Character, CharacterExtraction
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +47,11 @@ SYSTEM_PROMPT = """\
 """
 
 
-def _condense_known_characters(state: BatchState) -> str:
-    if not state.characters:
+def _condense_known_roster(known: Dict[str, Character]) -> str:
+    if not known:
         return "(暂无)"
     items: List[str] = []
-    for ch in state.characters.values():
+    for ch in known.values():
         bits = [ch.name]
         if ch.aliases:
             bits.append("别名:" + "/".join(ch.aliases[:3]))
@@ -60,9 +59,9 @@ def _condense_known_characters(state: BatchState) -> str:
     return "\n".join("- " + s for s in items)
 
 
-def _build_user_prompt(state: BatchState, batch: Batch) -> str:
-    roster = _condense_known_characters(state)
-    book_title = state.title or "(未提供书名)"
+def _build_user_prompt(batch: Batch, known: Dict[str, Character], title: str) -> str:
+    roster = _condense_known_roster(known)
+    book_title = title or "(未提供书名)"
     return (
         f"书名: {book_title}\n"
         f"批次序号: 第 {batch.index} 批\n"
@@ -73,12 +72,18 @@ def _build_user_prompt(state: BatchState, batch: Batch) -> str:
     )
 
 
-def extract_characters(state: BatchState, batch: Batch, llm: LLMClient) -> CharacterExtraction:
+def extract_for_batch(
+    batch: Batch,
+    known: Dict[str, Character],
+    llm: LLMClient,
+    *,
+    title: str = "",
+) -> CharacterExtraction:
     """对单个 batch 调一次 LLM,返回人物增量(不在此处合并)。"""
-    user_prompt = _build_user_prompt(state, batch)
+    user_prompt = _build_user_prompt(batch, known, title)
     logger.info(
         "character_extractor 第 %d 批(已知 %d 人),%s @ %s",
-        batch.index, len(state.characters), llm.model, llm.base_url,
+        batch.index, len(known), llm.model, llm.base_url,
     )
     delta = llm.chat_json(SYSTEM_PROMPT, user_prompt, CharacterExtraction)
     logger.info(
@@ -88,4 +93,4 @@ def extract_characters(state: BatchState, batch: Batch, llm: LLMClient) -> Chara
     return delta
 
 
-__all__ = ["extract_characters", "SYSTEM_PROMPT"]
+__all__ = ["extract_for_batch", "SYSTEM_PROMPT"]

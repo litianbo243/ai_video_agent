@@ -2,7 +2,7 @@
   "input": "input/斗破苍穹.epub",
   "output_dir": "output",
   "max_batch_chars": 8000,
-  "max_total_chars": 0,
+  "max_total_chars": 16000,
   "llm": {
     "base_url": "https://api.deepseek.com",
     "model": "deepseek-v4-pro",

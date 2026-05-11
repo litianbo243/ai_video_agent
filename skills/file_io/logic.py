@@ -1,26 +1,20 @@
 """小说分析流水线的本地文件 I/O。
 
-负责三件事:
+负责两件事:
 
 * 读取规范化后的源 ``.txt``;
-* 在每批分析后落盘 ``BatchState`` 检查点(避免半路崩溃丢失进度);
 * 把最终报告同时落成 JSON(机器可读)和 Markdown(人类可读)。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
-from schema.novel_analysis import (
-    BatchState,
-    Beat,
-    CharacterRoster,
-    Episode,
-    FinalReport,
-    Setting,
-    SettingCollection,
-)
+from skills.extract_beats.schema import Beat
+from skills.extract_characters.schema import CharacterRoster
+from skills.extract_settings.schema import SettingCollection
+from skills.file_io.schema import FinalReport
+from skills.storyboard_for_beat.schema import Episode
 
 
 def read_text_file(path: Path) -> str:
@@ -29,29 +23,6 @@ def read_text_file(path: Path) -> str:
     if not p.is_file():
         raise FileNotFoundError(p)
     return p.read_text(encoding="utf-8")
-
-
-_CHECKPOINT_NAME = "batch_state.json"
-
-
-def save_checkpoint(state: BatchState) -> Path:
-    """每批合并后写入完整滚动状态(单文件,覆盖)。
-
-    路径:``{output_dir}/batch_state.json``。幂等。
-    """
-    out_dir = Path(state.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / _CHECKPOINT_NAME
-    path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
-    return path
-
-
-def load_checkpoint(output_dir: Path) -> Optional[BatchState]:
-    """加载该 run 目录下的最新滚动状态;不存在则返回 ``None``。"""
-    path = Path(output_dir) / _CHECKPOINT_NAME
-    if not path.is_file():
-        return None
-    return BatchState.model_validate_json(path.read_text(encoding="utf-8"))
 
 
 def write_final_report(report: FinalReport, output_dir: Path) -> dict:

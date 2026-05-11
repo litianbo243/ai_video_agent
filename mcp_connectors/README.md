@@ -13,9 +13,9 @@
 
 需要让 agent 调用 **进程外** 的东西时:
 
-- **把分析器封装成 MCP server**,让 Cursor / Open WebUI / Dify 把它当成可调用工具。把 `agents.novel_analysis.manager.run` 暴露成 MCP 工具(例如 `analyze_novel(path, max_chars) -> FinalReport`),放到 `mcp_connectors/novel_analysis_mcp.py`。
-- **从远程源抓小说**(内部 CMS、Notion 数据库等)。在这里加 `mcp_connectors/<source>_mcp.py`,然后在 `agents/novel_analysis/workflow.py` 的 `detect_input` 之前插一个新节点调用它。
-- **把报告写到数据库**而不是本地文件系统。加 `mcp_connectors/database_mcp.py` 替换 `write` 节点。
+- **把分析器封装成 MCP server**,让 Cursor / Open WebUI / Dify 把它当成可调用工具。把 `agents.novel_analysis.manager.run`(或任意一个子-agent 的 `run`)暴露成 MCP 工具(例如 `analyze_novel(path, max_chars) -> FinalReport`),放到 `mcp_connectors/novel_analysis_mcp.py`。
+- **从远程源抓小说**(内部 CMS、Notion 数据库等)。在这里加 `mcp_connectors/<source>_mcp.py`,然后在 `agents/novel_analysis/ingest.py` 之前插一步调用它得到本地 txt。
+- **把报告写到数据库**而不是本地文件系统。加 `mcp_connectors/database_mcp.py` 替换 `write_final_report`。
 
 ## 编写连接器的约定
 

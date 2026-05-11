@@ -1,13 +1,6 @@
-"""子-agent:把单段剧情大纲(Beat)展开成单集分集分镜(Episode)。
+"""单段 Beat → 单集分镜:一次 LLM 调用。
 
-每段 Beat 一次 LLM 调用。input 包括:
-- Beat 本身(title / summary / setting_refs / character_refs)
-- 关联场景的视觉档案(Setting.description)
-- 关联人物的档案(Character.appearance / personality)
-- ★ 关联 batch 的原文(遍历 ``Beat.related_batches`` 从 BatchState.batches 反查并拼接)
-  —— 台词 / 旁白 / 视觉细节都从原文里直接挑选改编
-
-output: 单集 ``Episode``(含 storyboards)。
+回查 Beat.related_batches 对应原文,把场景/人物/原文都拼进 prompt。
 """
 
 from __future__ import annotations
@@ -15,26 +8,14 @@ from __future__ import annotations
 import logging
 from typing import Dict, List
 
-from pydantic import BaseModel, Field
-
 from llm.client import LLMClient
-from schema.novel_analysis import (
-    Batch,
-    Beat,
-    BatchState,
-    Character,
-    Episode,
-    Setting,
-    Storyboard,
-)
+from skills.batch_chapters import Batch
+from skills.extract_beats.schema import Beat
+from skills.extract_characters.schema import Character
+from skills.extract_settings.schema import Setting
+from skills.storyboard_for_beat.schema import Episode, StoryboardList
 
 logger = logging.getLogger(__name__)
-
-
-class _StoryboardList(BaseModel):
-    """LLM JSON 输出包装(``chat_json`` 要求 schema 是 ``BaseModel`` 子类)。"""
-
-    storyboards: List[Storyboard] = Field(default_factory=list)
 
 
 SYSTEM_PROMPT = """\
@@ -61,16 +42,26 @@ SYSTEM_PROMPT = """\
 - 原文里不重要的支线 / 水分内容**直接跳过**(不必逐字改编)
 
 dialogue 字段(从原文里挑选):
-- 浏览原文,挑出有戏剧张力的角色对白:揭示关系 / 体现冲突 / 决断 / 反转
+- 浏览原文,挑出有戏剧张力的**角色对白 / 群众议论 / 测验员或执事式播报**:
+  揭示关系 / 体现冲突 / 决断 / 反转 / 当众宣布结果
 - **照抄原文台词**;太长不适合视频节奏 → 浓缩或在切点拆分
 - 长台词跨多镜时,**不要重复整句**,在标点处把句子拆成多段
 - 普通陈述、寒暄、过渡台词不要选
+- 说话者不在「角色档案」里(路人、测验员等)时,仍把其**开口说的话**放在 dialogue;
+  characters 字段只填本镜画面里可辨认的 roster 人物,没有则留空列表
 - 实在挑不到合适的可自由创作,但要保留人物语气
 
-voiceover 字段(从原文挑选):
-- 旁白来自小说**叙述性原文**(描写 / 评论 / 心理),非对白
-- 把原文的关键叙述**提炼成 1-2 句念白,保留原作语气**
-- 长旁白跨多镜时按画面切点切片
+voiceover 字段(从原文挑选,但默认少用):
+- **优先留空字符串 ""** —— 能用镜头 + 表演 + 环境音表现的,就不要念旁白
+- 仅当原文有**第三人称叙事/作者评论/必要信息**且**画面 alone 难以传达**时,
+  才从原文**浓缩为一句**念白(建议 ≤35 字),保留语气
+- **禁止**放入以下内容(这些一律进 dialogue,不是旁白):
+  * 任何人**说出声**的话(含群众嘲讽、窃窃私语式的直接引语)
+  * 测验员 / 执事 / 系统播报式宣读(如「斗之气,X 段」)
+  * 带引号的对白原文
+- **禁止**与 description 同义重复:若 description 已写清动作、情绪、场面,
+  voiceover **必须为空**,不要把小说叙述再念一遍
+- 长旁白跨多镜时按画面切点切片,每镜最多一句
 
 description 字段(给图像生成模型):
 - 从原文的视觉描写里**提取关键意象**:谁在做什么 + 光线 + 构图
@@ -92,6 +83,7 @@ shot_type 字段:6 选 1 — 远景 / 全景 / 中景 / 近景 / 特写 / 大特
 【绝对约束】
 - 不杜撰人物或事件,所有内容必须有原文支撑
 - dialogue / voiceover 必须来自原文(直接搬或浓缩),不要凭空创作
+- 全集约 30%-50% 的镜头 voiceover 应为空;连续多镜不要镜镜念旁白
 - characters 字段必须是输入"角色档案"里出现过的 name
 - setting 字段必须是 Beat.setting_refs 里出现过的 name
 - 一集所有镜头时长加起来要接近 {target_duration} 秒
@@ -99,15 +91,16 @@ shot_type 字段:6 选 1 — 远景 / 全景 / 中景 / 近景 / 特写 / 大特
 """
 
 
-def _gather_beat_inputs(
+def _gather_inputs(
     beat: Beat,
-    state: BatchState,
+    characters: Dict[str, Character],
+    settings: Dict[str, Setting],
+    batches: Dict[int, Batch],
 ) -> tuple[List[Setting], List[Character], str]:
     """按 Beat 检索关联的 Setting / Character / 原文章节。"""
-    # 1. Settings(按 setting_refs 匹配)
     relevant_settings: List[Setting] = []
     for ref in beat.setting_refs:
-        s = state.settings.get(ref)
+        s = settings.get(ref)
         if s is None:
             logger.warning(
                 "第 %d 段 Beat 引用的 Setting 不存在:%r(LLM 可能造了个 name)",
@@ -116,10 +109,9 @@ def _gather_beat_inputs(
             continue
         relevant_settings.append(s)
 
-    # 2. Characters(按 character_refs 匹配)
     relevant_chars: List[Character] = []
     for ref in beat.character_refs:
-        ch = state.characters.get(ref)
+        ch = characters.get(ref)
         if ch is None:
             logger.warning(
                 "第 %d 段 Beat 引用的 Character 不存在:%r",
@@ -128,11 +120,9 @@ def _gather_beat_inputs(
             continue
         relevant_chars.append(ch)
 
-    # 3. 原文:按 related_batches 顺序反查 BatchState.batches,拼接所有相关 batch 原文
     parts: List[str] = []
-    batch_lookup: dict[int, Batch] = {b.index: b for b in state.batches}
     for bi in beat.related_batches:
-        batch = batch_lookup.get(bi)
+        batch = batches.get(bi)
         if batch is None:
             logger.warning("第 %d 段 Beat 关联的 batch %d 未找到原文", beat.index, bi)
             continue
@@ -195,21 +185,27 @@ def _build_user_prompt(
     )
 
 
-def storyboard_beat(beat: Beat, state: BatchState, llm: LLMClient) -> Episode:
+def storyboard_beat(
+    beat: Beat,
+    characters: Dict[str, Character],
+    settings: Dict[str, Setting],
+    batches: Dict[int, Batch],
+    llm: LLMClient,
+    *,
+    target_duration_sec: int = 180,
+) -> Episode:
     """把一段 Beat 展开为一集 Episode(含 storyboards)。"""
-    settings, chars, raw_text = _gather_beat_inputs(beat, state)
+    settings_list, chars_list, raw_text = _gather_inputs(beat, characters, settings, batches)
 
-    system = SYSTEM_PROMPT.format(target_duration=state.target_episode_duration_sec)
-    user = _build_user_prompt(
-        beat, settings, chars, raw_text, state.target_episode_duration_sec,
-    )
+    system = SYSTEM_PROMPT.format(target_duration=target_duration_sec)
+    user = _build_user_prompt(beat, settings_list, chars_list, raw_text, target_duration_sec)
 
     logger.info(
         "storyboarder 第 %d 段(%s):场景=%d 人物=%d 原文=%d 字",
-        beat.index, beat.title, len(settings), len(chars), len(raw_text),
+        beat.index, beat.title, len(settings_list), len(chars_list), len(raw_text),
     )
 
-    sb_pack = llm.chat_json(system, user, _StoryboardList)
+    sb_pack = llm.chat_json(system, user, StoryboardList)
 
     logger.info("第 %d 段产出:%d 镜", beat.index, len(sb_pack.storyboards))
 

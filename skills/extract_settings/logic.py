@@ -1,16 +1,16 @@
-"""子-agent:场景抽取。
+"""单批场景抽取:一次 LLM 调用,返回本批增量。
 
-从单批章节正文里提取物理地点的视觉档案。每批一次 LLM 调用。
-合并语义见 ``BatchState.merge_settings``:同名 → description 非空才覆盖,
-新名 → 新增。
+合并(同名 description 覆盖、新增赋 index)放在 ``manager.py``。
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Dict
 
 from llm.client import LLMClient
-from schema.novel_analysis import Batch, BatchState, SettingExtraction
+from skills.batch_chapters import Batch
+from skills.extract_settings.schema import Setting, SettingExtraction
 
 logger = logging.getLogger(__name__)
 
@@ -45,31 +45,37 @@ SYSTEM_PROMPT = """\
 """
 
 
-def _condense_known_settings(state: BatchState) -> str:
-    if not state.settings:
+def _condense_known(known: Dict[str, Setting]) -> str:
+    if not known:
         return "(暂无)"
-    return "\n".join(f"- {name}" for name in state.settings.keys())
+    return "\n".join(f"- {name}" for name in known.keys())
 
 
-def _build_user_prompt(state: BatchState, batch: Batch) -> str:
-    settings = _condense_known_settings(state)
-    book_title = state.title or "(未提供书名)"
+def _build_user_prompt(batch: Batch, known: Dict[str, Setting], title: str) -> str:
+    settings_str = _condense_known(known)
+    book_title = title or "(未提供书名)"
     return (
         f"书名: {book_title}\n"
         f"批次序号: 第 {batch.index} 批\n"
         f"批次字数: 约 {batch.char_count}\n\n"
-        f"=== 此前已知场景名单 ===\n{settings}\n\n"
+        f"=== 此前已知场景名单 ===\n{settings_str}\n\n"
         f"=== 本批次正文 ===\n{batch.render_for_prompt()}\n\n"
         f"=== 任务 ===\n请按 JSON Schema 输出 SettingExtraction。"
     )
 
 
-def extract_settings(state: BatchState, batch: Batch, llm: LLMClient) -> SettingExtraction:
-    """对单个 batch 调一次 LLM,返回场景增量(不在此处合并)。"""
-    user_prompt = _build_user_prompt(state, batch)
+def extract_for_batch(
+    batch: Batch,
+    known: Dict[str, Setting],
+    llm: LLMClient,
+    *,
+    title: str = "",
+) -> SettingExtraction:
+    """对单个 batch 调一次 LLM,返回场景增量。"""
+    user_prompt = _build_user_prompt(batch, known, title)
     logger.info(
         "setting_extractor 第 %d 批(已知 %d 处),%s @ %s",
-        batch.index, len(state.settings), llm.model, llm.base_url,
+        batch.index, len(known), llm.model, llm.base_url,
     )
     delta = llm.chat_json(SYSTEM_PROMPT, user_prompt, SettingExtraction)
     logger.info(
@@ -79,4 +85,4 @@ def extract_settings(state: BatchState, batch: Batch, llm: LLMClient) -> Setting
     return delta
 
 
-__all__ = ["extract_settings", "SYSTEM_PROMPT"]
+__all__ = ["extract_for_batch", "SYSTEM_PROMPT"]

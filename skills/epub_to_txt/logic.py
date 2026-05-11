@@ -1,6 +1,6 @@
 """把 .epub 电子书转换成 UTF-8 .txt。
 
-只用标准库 —— 这是刻意为之,任何 agent 在一台干净的机器上都能直接调用,
+只用标准库 —— 这是刻意为之,任何 workflow / skill 在一台干净的机器上都能直接调用,
 不必先装第三方依赖。
 
 契约(对应 .cursor/skills/epub-to-txt/SKILL.md):

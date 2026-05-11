@@ -14,7 +14,7 @@
 
 ```python
 from skills.batch_chapters import load_text, split_into_batches
-from schema import Batch  # 跨模块共享的数据结构
+from skills.batch_chapters import Batch
 
 title, body = load_text(Path("input.txt"))
 

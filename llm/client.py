@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 if TYPE_CHECKING:
-    from schema.config import LLMConfig
+    from configs import LLMConfig
 
 
 @dataclass
@@ -147,7 +147,7 @@ if __name__ == "__main__":
 
     from pydantic import Field
 
-    from schema.config import LLMConfig
+    from configs import LLMConfig
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 

@@ -1,6 +1,6 @@
-"""运行时配置 —— config 文件的数据契约。
+"""``configs/*.json`` 配置文件的 Pydantic 数据契约。
 
-config 文件长这样::
+JSON 文件长这样::
 
     {
       "input": "input/your_novel.epub",
@@ -15,7 +15,10 @@ config 文件长这样::
       }
     }
 
-API key 不放在 JSON 里,走 .env / 环境变量。
+* ``RunConfig`` —— 整个 JSON 文件的根
+* ``LLMConfig`` —— 其中 ``llm`` 子段
+
+API key 不写进 JSON,走 ``.env`` / 环境变量(由 ``api_key_env`` 字段指定变量名)。
 """
 
 from __future__ import annotations
@@ -108,9 +111,9 @@ class RunConfig(BaseModel):
         ...,
         description="源小说路径(.txt / .epub)",
     )
-    output_dir: Optional[str] = Field(
-        default=None,
-        description="输出目录;留空时自动派生",
+    output_dir: str = Field(
+        ...,
+        description="输出根目录;每次 run 会在它下面建一个时间戳子目录",
     )
     max_batch_chars: int = Field(
         default=8_000,

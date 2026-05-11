@@ -1,13 +1,9 @@
-from skills.file_io.logic import (
-    load_checkpoint,
-    read_text_file,
-    save_checkpoint,
-    write_final_report,
-)
+from skills.file_io.logic import read_text_file, write_final_report
+from skills.file_io.schema import FinalReport, ReportMeta
 
 __all__ = [
-    "load_checkpoint",
+    "FinalReport",
+    "ReportMeta",
     "read_text_file",
-    "save_checkpoint",
     "write_final_report",
 ]

@@ -1,25 +1,18 @@
-"""子-agent:剧情大纲段抽取。
+"""单批剧情段抽取:一次 LLM 调用,返回本批增量。
 
-从单批章节正文里提取"剧情大纲段"(Beat)。每段是一段有完整起承转合 + 至少一个
-小高潮的连贯剧情,关联多个 Setting / Character,引用本 batch 编号。
-
-input:
-- 本批章节正文
-- **前 N 段**剧情大纲(默认 10 段,用于节奏接续)
-- 已知人物名单(用作 character_refs 的引用域)
-- 已知场景名单(用作 setting_refs 的引用域)
-
-合并语义见 ``BatchState.merge_beats``:新段追加(自动赋全局 ``index`` + 把当前
-batch 加进 ``related_batches``);延续段把当前 batch 加进对应段的 ``related_batches``。
+合并(新段赋 index、延续段追加 related_batches)放在 ``manager.py``。
 """
 
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Dict, List
 
 from llm.client import LLMClient
-from schema.novel_analysis import Batch, BatchState, Beat, BeatExtraction
+from skills.batch_chapters import Batch
+from skills.extract_beats.schema import Beat, BeatExtraction
+from skills.extract_characters.schema import Character
+from skills.extract_settings.schema import Setting
 
 logger = logging.getLogger(__name__)
 
@@ -91,45 +84,53 @@ def _render_recent_beats(beats: List[Beat], window: int) -> str:
     return "\n".join(parts)
 
 
-def _condense_known_characters(state: BatchState) -> str:
-    if not state.characters:
+def _condense_names(names: List[str]) -> str:
+    if not names:
         return "(暂无)"
-    return "\n".join(f"- {name}" for name in state.characters.keys())
+    return "\n".join(f"- {n}" for n in names)
 
 
-def _condense_known_settings(state: BatchState) -> str:
-    if not state.settings:
-        return "(暂无)"
-    return "\n".join(f"- {name}" for name in state.settings.keys())
-
-
-def _build_user_prompt(state: BatchState, batch: Batch) -> str:
-    recent = _render_recent_beats(state.beats, CONTEXT_WINDOW)
-    chars = _condense_known_characters(state)
-    settings = _condense_known_settings(state)
-    book_title = state.title or "(未提供书名)"
+def _build_user_prompt(
+    batch: Batch,
+    beats_so_far: List[Beat],
+    characters: Dict[str, Character],
+    settings: Dict[str, Setting],
+    title: str,
+) -> str:
+    recent = _render_recent_beats(beats_so_far, CONTEXT_WINDOW)
+    chars = _condense_names(list(characters.keys()))
+    setts = _condense_names(list(settings.keys()))
+    book_title = title or "(未提供书名)"
     return (
         f"书名: {book_title}\n"
         f"批次序号: 第 {batch.index} 批\n"
         f"批次字数: 约 {batch.char_count}\n\n"
         f"=== 此前最近 {CONTEXT_WINDOW} 段剧情大纲(节奏接续) ===\n{recent}\n\n"
         f"=== 已知人物名单(character_refs 必须用这里的 name)===\n{chars}\n\n"
-        f"=== 已知场景名单(setting_refs 必须用这里的 name)===\n{settings}\n\n"
+        f"=== 已知场景名单(setting_refs 必须用这里的 name)===\n{setts}\n\n"
         f"=== 本批次正文 ===\n{batch.render_for_prompt()}\n\n"
         f"=== 任务 ===\n请按 JSON Schema 输出 BeatExtraction。"
     )
 
 
-def extract_beats(state: BatchState, batch: Batch, llm: LLMClient) -> BeatExtraction:
-    """对单个 batch 调一次 LLM,返回剧情段增量(不在此处合并)。"""
-    user_prompt = _build_user_prompt(state, batch)
+def extract_for_batch(
+    batch: Batch,
+    beats_so_far: List[Beat],
+    characters: Dict[str, Character],
+    settings: Dict[str, Setting],
+    llm: LLMClient,
+    *,
+    title: str = "",
+) -> BeatExtraction:
+    """对单个 batch 调一次 LLM,返回剧情段增量。"""
+    user_prompt = _build_user_prompt(batch, beats_so_far, characters, settings, title)
     logger.info(
         "beat_extractor 第 %d 批(此前 %d 段),%s @ %s",
-        batch.index, len(state.beats), llm.model, llm.base_url,
+        batch.index, len(beats_so_far), llm.model, llm.base_url,
     )
     delta = llm.chat_json(SYSTEM_PROMPT, user_prompt, BeatExtraction)
     logger.info("beat_extractor 第 %d 批产出:%d 段", batch.index, len(delta.new_beats))
     return delta
 
 
-__all__ = ["extract_beats", "SYSTEM_PROMPT", "CONTEXT_WINDOW"]
+__all__ = ["extract_for_batch", "SYSTEM_PROMPT", "CONTEXT_WINDOW"]

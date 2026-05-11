@@ -5,7 +5,7 @@
 保证不会切在词中间。
 
 不关心章节;每段用稳定的 1-based ``Batch.index`` 标识(可作 checkpoint 锚点)。
-``Batch`` 数据结构定义在 ``schema.novel_analysis``,跨模块共享。
+``Batch`` 数据结构定义在 ``schema.batch``,跨模块共享。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple
 
-from schema.novel_analysis import Batch
+from skills.batch_chapters.schema import Batch
 
 
 def _strip_title_marker(text: str) -> Tuple[str, str]:
