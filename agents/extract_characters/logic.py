@@ -10,7 +10,7 @@ from typing import Dict, List
 
 from llm.client import LLMClient
 from skills.batch_chapters import Batch
-from skills.extract_characters.schema import Character, CharacterExtraction
+from agents.extract_characters.schema import Character, CharacterExtraction
 
 logger = logging.getLogger(__name__)
 

@@ -24,7 +24,7 @@ from configs import RunConfig
 from llm.client import LLMClient, get_client
 from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, ingest_book
-from skills.extract_settings import (
+from agents.extract_settings import (
     Setting,
     SettingCollection,
     SettingExtraction,

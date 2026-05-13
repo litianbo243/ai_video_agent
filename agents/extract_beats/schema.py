@@ -1,4 +1,4 @@
-"""extract_beats skill 的全部数据契约。
+"""extract_beats agent 的全部数据契约。
 
 层次:
 
@@ -7,7 +7,7 @@
 * ``BeatList``       —— 一次 run 的全部剧情段
 * ``BeatExtraction`` —— 单次 LLM 调用的输出包装(新段 + 延续段)
 
-数据语义跟"这次 LLM 调用想抽什么"绑死,所以全部住在 skill 内部。
+数据语义跟"这次 LLM 调用想抽什么"绑死,所以全部住在 agent 内部。
 """
 
 from __future__ import annotations

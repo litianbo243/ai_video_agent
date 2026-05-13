@@ -4,30 +4,38 @@
 
 这是 Stage 1(分析层),Stage 2/3 会基于本阶段产物做角色定调图、场景定调图、分镜出图、视频合成。
 
-## 流水线
+## 三层概念
 
-每个分析维度是一个**独立的子-agent**,有自己明确的 I/O 契约;`novel_analysis` 顶层 agent 只负责按依赖顺序把它们串起来。
+| 层 | 含义 | 位置 |
+|---|---|---|
+| **agent** | 一次 LLM 调用 + prompt + I/O schema。最小"会思考"单元。 | `agents/extract_*/` |
+| **skill** | 确定性原语,不调 LLM(epub 解码、文本分批、文件 I/O)。 | `skills/<name>/` |
+| **workflow** | 用 LangGraph 把 agent + skill 编排成 DAG(multi-agent)。 | `workflows/<name>.py` |
+
+agent 之间不互相 import 运行逻辑;跨 agent 数据流靠 workflow state 传。
+
+## 流水线
 
 ```
 输入文件 (.txt | .epub)
         │
         ▼
-agents/novel_analysis/ingest.py  (skill: epub_to_txt + batch_chapters)
+   skills/book_ingest.ingest_book  (= epub_to_txt + batch_chapters)
         │
-        ▼  (title, batches)
-   ┌────┴────────────────────────────────────────────────┐
-   │  4 个独立 agent,按依赖顺序串调                       │
-   │                                                       │
-   │  agents/character_analysis ─→ CharacterRoster        │
-   │  agents/setting_analysis   ─→ SettingCollection      │
-   │  agents/beat_analysis      ─→ BeatList               │
-   │       (依赖 roster + settings)                        │
-   │  agents/storyboard_analysis─→ ScreenplayAnalysis     │
-   │       (依赖 beats + roster + settings + batches)     │
-   └─────────────────────────────────────────────────────┘
+        ▼  IngestResult(title, batches, ...)
+   ┌────┴────────────────────────────────────────────────────────┐
+   │  4 个 agent,workflow 按依赖串调(character/setting 并行)     │
+   │                                                              │
+   │  agents/extract_characters ─→ CharacterRoster               │
+   │  agents/extract_settings   ─→ SettingCollection             │
+   │  agents/extract_beats      ─→ BeatList                      │
+   │       (依赖 roster + settings)                               │
+   │  agents/extract_storyboard ─→ ScreenplayAnalysis            │
+   │       (依赖 beats + roster + settings + batches,逐 beat 调) │
+   └────────────────────────────────────────────────────────────┘
         │
         ▼
-write_final_report (skill: file_io)
+   skills/file_io.write_final_report
         │
         ▼
 {output_dir}/{YYYYMMDD_HHMMSS}/    每次运行新建带时间戳的子目录
@@ -38,39 +46,42 @@ write_final_report (skill: file_io)
 └── meta.json                      运行元信息(书名 / 字数 / 批次数 / LLM)
 ```
 
-每个子-agent 都可以**单独被调用**,只要传它需要的依赖即可(见下方"单独使用某个子-agent")。MCP 是预留给*外部*服务的 —— 详见 [`mcp_connectors/README.md`](mcp_connectors/README.md)。
+每个 workflow 都可以**单独跑**(见 [run_workflow.py](run_workflow.py));workflow 内部会按需调起依赖的上游 workflow 或 agent。MCP 是预留给*外部*服务的 —— 详见 [`mcp_connectors/README.md`](mcp_connectors/README.md)。
 
 ## 项目结构
 
 ```
 ai_video_agent/
-├── agents/
-│   ├── character_analysis/              # 独立子-agent,人物档案
-│   │   ├── manager.py                   #   run(batches, llm, *, title="") -> CharacterRoster
-│   │   ├── extractor.py                 #   单批 LLM 调用
-│   │   └── schema.py                    #   LLM 私有 IO(CharacterExtraction)
-│   ├── setting_analysis/                # 独立子-agent,场景档案
-│   ├── beat_analysis/                   # 独立子-agent,剧情大纲段
-│   ├── storyboard_analysis/             # 独立子-agent,分集 + 分镜
-│   └── novel_analysis/                  # 顶层编排:调上面 4 个
-│       ├── manager.py                   #   run(config) -> RunResult
-│       └── ingest.py                    #   epub→txt + 切批
-├── skills/                              # 原生技能(确定性,不调 LLM,跨 agent 共享)
+├── agents/                        # LLM-backed:每个目录 = 一次 LLM 调用
+│   ├── extract_characters/
+│   │   ├── __init__.py            #   重导公共 API + schema
+│   │   ├── logic.py               #   SYSTEM_PROMPT + chat_json + 后处理
+│   │   └── schema.py              #   I/O 契约(Character / Roster / Extraction)
+│   ├── extract_settings/
+│   ├── extract_beats/             # 依赖 character + setting schema
+│   └── extract_storyboard/        # 依赖前三个 schema;单 beat → 一集分镜
+├── skills/                        # 确定性原语,不调 LLM
 │   ├── epub_to_txt/
 │   ├── batch_chapters/
-│   ├── file_io/
+│   ├── book_ingest/               # = epub_to_txt + batch_chapters 的组合
+│   ├── file_io/                   # 写 FinalReport(JSON + Markdown)
 │   └── skills_manifest.json
-├── mcp_connectors/                # 预留给未来的外部 MCP 适配
-├── schema/
-│   ├── config.py                  # RunConfig:CLI 接受的 JSON 契约
-│   └── novel_analysis.py          # 共享领域模型(Character / Setting / Beat / Episode ...)
+├── workflows/                     # LangGraph DAG,组合 agent + skill
+│   ├── character_analysis.py
+│   ├── setting_analysis.py
+│   ├── beat_analysis.py           # 内部并行 char + setting,再串到 beat
+│   ├── storyboard_analysis.py     # 内部跑 beat_analysis,逐 beat 调 storyboard agent
+│   └── novel_analysis.py          # 顶层:全跑一遍,落 FinalReport
+├── configs/
+│   ├── config.py                  # RunConfig / LLMConfig
+│   ├── novel_analysis.json        # 示例 config
+│   └── __init__.py                # load_config(...)
 ├── llm/
 │   └── client.py                  # OpenAI 兼容客户端
-├── configs/
-│   └── novel_analysis.json
+├── mcp_connectors/                # 预留给未来的外部 MCP 适配
 ├── inputs/                        # 源材料,git ignore
 ├── outputs/                       # 运行产物,git ignore
-├── run_workflow.py                # CLI 入口:在 __main__ 里选要跑哪个 workflow
+├── run_workflow.py                # CLI 入口:__main__ 里选要跑哪个 workflow
 ├── requirements.txt
 └── .env.example
 ```
@@ -121,7 +132,7 @@ python run_workflow.py
 | `max_total_chars` | **整本小说**字数上限,超出从尾部直接截断;`0` = 不截断(默认)。**用作快速试跑只取前 N 万字看效果** |
 | `target_episode_duration_sec` | 期望每集时长(秒),LLM 据此分集 + 分镜;默认 180(3 分钟一集,典型短视频) |
 
-Pydantic 模型定义在 [`schema/config.py`](schema/config.py)。
+Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。
 
 > **API key 不要放在 JSON 里**,走 `.env` / 环境变量。config 通过 `api_key_env` 字段指明读哪个变量。这样 config 可以放心入 git。
 
@@ -204,38 +215,50 @@ result = run(config)
 print(result.output_paths)
 ```
 
-## 单独使用某个子-agent
+## 单独跑某个 workflow
 
-每个子-agent 都分两层 API:
-
-* **顶层 `run(config)`** —— 吃项目 `RunConfig`,内部建 LLM、做 ingest,再调内层。
-  runner 用这条。**只有能独立起步的 agent 才暴露**(character / setting)。
-* **内层 `run_with_batches(batches, llm, ...)`** —— 纯计算,workflow 用,
-  4 个 agent 都有。
-
-最方便的入口(单跑某个 agent):
+每个 workflow 都暴露 `run(config) -> ...`,内部自己起 LLM + ingest + 依赖的上游 workflow:
 
 ```python
-from workflows import character_analysis, setting_analysis
 from configs import load_config
+from workflows import (
+    character_analysis, setting_analysis,
+    beat_analysis, storyboard_analysis, novel_analysis,
+)
 
 config = load_config("configs/novel_analysis.json")
 
-# 只跑人物(顶层,内部包了 LLM + ingest)
+# 只要人物
 ing, roster = character_analysis.run(config)
 
-# 只跑场景(同上)
-ing, settings = setting_analysis.run(config)
+# 只要分镜(内部会先跑 character + setting + beat)
+ing, roster, settings, beats, screenplay = storyboard_analysis.run(config)
+
+# 全跑
+result = novel_analysis.run(config)  # 落 screenplay.json/.md + characters.json/.md + ... + meta.json
 ```
 
-需要更细控制(自己管 ingest / LLM,例如在 notebook 里复用同一份 batches 跑多个 agent),
-用内层 API:
+`run_workflow.py` 末尾 `__main__` 里 5 个函数对应 5 个 workflow,改一行选哪个跑。
+
+依赖关系一图流(workflow 内部自动满足):
+
+| Workflow | 直接依赖的 agent / 上游 workflow |
+|---|---|
+| `character_analysis` | `agents/extract_characters` |
+| `setting_analysis` | `agents/extract_settings` |
+| `beat_analysis` | character_analysis + setting_analysis + `agents/extract_beats` |
+| `storyboard_analysis` | beat_analysis + `agents/extract_storyboard` |
+| `novel_analysis` | 上面全部 + `skills/file_io.write_final_report` |
+
+## 直接复用 agent
+
+跳过 workflow 编排,直接拼 agent 调用(notebook / 自定义流水线场景):
 
 ```python
-from workflows import character_analysis, setting_analysis, beat_analysis, storyboard_analysis
 from configs import load_config
 from llm.client import get_client
 from skills.book_ingest import ingest_book
+from agents.extract_characters import extract_for_batch as extract_chars
 
 config = load_config("configs/novel_analysis.json")
 llm = get_client(config.llm)
@@ -243,54 +266,39 @@ ing = ingest_book(config.input,
                   max_batch_chars=config.max_batch_chars,
                   max_total_chars=config.max_total_chars)
 
-roster = character_analysis.run_with_batches(ing.batches, llm, title=ing.title)
-settings = setting_analysis.run_with_batches(ing.batches, llm, title=ing.title)
-beats = beat_analysis.run_with_batches(
-    ing.batches, roster, settings, llm, title=ing.title,
-)
-screenplay = storyboard_analysis.run_with_batches(
-    beats, roster, settings, ing.batches, llm,
-    target_duration_sec=180, title=ing.title,
-)
+# 自己写循环 / 自己合并 delta —— 工作流职责
+known = {}
+for batch in ing.batches:
+    delta = extract_chars(batch, known, llm, title=ing.title)
+    # ... 合并 delta 到 known ...
 ```
 
-依赖关系一图流:
-
-| Agent | 直接依赖项 |
-|---|---|
-| `character_analysis` | batches |
-| `setting_analysis` | batches |
-| `beat_analysis` | batches + `CharacterRoster` + `SettingCollection` |
-| `storyboard_analysis` | batches + `BeatList` + `CharacterRoster` + `SettingCollection` |
-
-## 新增一个技能
+## 新增一个 skill
 
 ```
 skills/<name>/
 ├── __init__.py     # 暴露公共函数
 ├── logic.py        # 纯 Python 实现,不调 LLM
-└── readme.md       # 给 Agent 读的"秘籍" —— 契约、IO、不变量
+├── schema.py       # (可选)I/O 契约
+└── readme.md       # 给 LLM-driven agent 读的"秘籍" —— 契约、IO、不变量
 ```
 
-最后把这条 entry 加到 `skills/skills_manifest.json`。
+如果 skill 有确定性入口,把元数据加到 `skills/skills_manifest.json`。
 
 ## 新增一个 agent
 
-参考 `agents/character_analysis/` 的目录结构:
-
 ```
-agents/<name>/
-├── __init__.py     # 只导出 `run`
-├── manager.py      # 公开入口:run(...) -> <DomainOutputModel>
-├── extractor.py    # 单批 LLM 调用(prompt + chat_json),不做循环
-└── schema.py       # LLM 私有 IO(只本 agent 用)
+agents/extract_<X>/
+├── __init__.py     # 重导 logic 的公共函数 + schema 的公共类型
+├── logic.py        # SYSTEM_PROMPT + 单次 chat_json 调用 + 必要后处理
+└── schema.py       # I/O 契约:Draft(LLM 原始输出) / Domain(合并后) / Collection / *Extraction
 ```
 
 约定:
-- **manager.run()** 是该 agent 的对外 API,签名里显式声明所有依赖项(没有隐藏全局状态)。
-- **共享领域类型**(`Character` / `Setting` / `Beat` ...)放在 `schema/novel_analysis.py`。
-- **LLM 私有产物**(`*Extraction`)放在 agent 自己的 `schema.py`,不外泄。
-- **不要**抽 `Input / Output` 包装对象,除非真要跨 CLI / HTTP 边界。
+- agent 只做**一次 LLM 调用**(单批 / 单 beat / 单 prompt)。批次循环、合并累积是 workflow 的职责。
+- agent **不直接 import 别的 agent 的 logic**;但可以 `from agents.extract_Y.schema import ...` 复用类型契约。
+- agent 可以 `from skills.X import ...` 用确定性原语。
+- 把 agent 接到 workflow:在 `workflows/<flow>.py` 里 build 一个 LangGraph 节点,内部循环调 `extract_for_batch`(或 `storyboard_beat`)。
 
 ## Cursor IDE 技能 vs 运行时技能(两个不同的层)
 

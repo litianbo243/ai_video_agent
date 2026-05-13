@@ -61,11 +61,11 @@ from configs import RunConfig
 from llm.client import LLMClient, get_client
 from skills.book_ingest import IngestResult, load_and_batch_txt
 from skills.epub_to_txt import epub_to_txt
-from skills.extract_beats import BeatList
-from skills.extract_characters import CharacterRoster
-from skills.extract_settings import SettingCollection
+from agents.extract_beats import BeatList
+from agents.extract_characters import CharacterRoster
+from agents.extract_settings import SettingCollection
+from agents.extract_storyboard import ScreenplayAnalysis
 from skills.file_io import FinalReport, ReportMeta, write_final_report
-from skills.storyboard_for_beat import ScreenplayAnalysis
 from workflows import (
     beat_analysis,
     character_analysis,

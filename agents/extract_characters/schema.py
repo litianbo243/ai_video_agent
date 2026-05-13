@@ -1,4 +1,4 @@
-"""extract_characters skill 的全部数据契约。
+"""extract_characters agent 的全部数据契约。
 
 层次:
 
@@ -7,9 +7,9 @@
 * ``CharacterRoster``    —— 一次 run 的全部人物
 * ``CharacterExtraction``—— 单次 LLM 调用的输出包装(``new_or_updated_characters``)
 
-数据语义跟"这次 LLM 调用想抽什么"绑死,所以全部住在 skill 内部,而不是放进
-跨 workflow 的 ``schema/``。``Character`` / ``CharacterRoster`` 虽然是工作流
-产物,但其字段形状完全由本 skill 的 LLM 抽取契约决定,放在一起最自洽。
+数据语义跟"这次 LLM 调用想抽什么"绑死,所以全部住在 agent 内部。
+``Character`` / ``CharacterRoster`` 虽然会跨 workflow 流通,但字段形状完全
+由本 agent 的 LLM 抽取契约决定,放在一起最自洽。
 """
 
 from __future__ import annotations

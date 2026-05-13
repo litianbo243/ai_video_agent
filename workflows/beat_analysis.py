@@ -39,9 +39,9 @@ from configs import RunConfig
 from llm.client import LLMClient, get_client
 from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, ingest_book
-from skills.extract_beats import Beat, BeatExtraction, BeatList, extract_for_batch
-from skills.extract_characters import Character, CharacterRoster
-from skills.extract_settings import Setting, SettingCollection
+from agents.extract_beats import Beat, BeatExtraction, BeatList, extract_for_batch
+from agents.extract_characters import Character, CharacterRoster
+from agents.extract_settings import Setting, SettingCollection
 from workflows import character_analysis, setting_analysis
 
 logger = logging.getLogger(__name__)

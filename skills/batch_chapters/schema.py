@@ -1,8 +1,8 @@
 """batch_chapters skill 的产出类型。
 
-``Batch`` 是 ``split_into_batches`` 的产物,也是 4 个 LLM-backed skill
-(extract_characters / extract_settings / extract_beats / storyboard_for_beat)
-共享的输入契约。
+``Batch`` 是 ``split_into_batches`` 的产物,也是 4 个 agent
+(``agents/extract_characters`` / ``extract_settings`` / ``extract_beats`` /
+``extract_storyboard``)共享的输入契约。
 """
 
 from __future__ import annotations

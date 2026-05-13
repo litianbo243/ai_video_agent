@@ -10,9 +10,9 @@ from typing import Dict, List
 
 from llm.client import LLMClient
 from skills.batch_chapters import Batch
-from skills.extract_beats.schema import Beat, BeatExtraction
-from skills.extract_characters.schema import Character
-from skills.extract_settings.schema import Setting
+from agents.extract_beats.schema import Beat, BeatExtraction
+from agents.extract_characters.schema import Character
+from agents.extract_settings.schema import Setting
 
 logger = logging.getLogger(__name__)
 

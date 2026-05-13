@@ -10,10 +10,10 @@ from typing import Dict, List
 
 from llm.client import LLMClient
 from skills.batch_chapters import Batch
-from skills.extract_beats.schema import Beat
-from skills.extract_characters.schema import Character
-from skills.extract_settings.schema import Setting
-from skills.storyboard_for_beat.schema import Episode, StoryboardList
+from agents.extract_beats.schema import Beat
+from agents.extract_characters.schema import Character
+from agents.extract_settings.schema import Setting
+from agents.extract_storyboard.schema import Episode, StoryboardList
 
 logger = logging.getLogger(__name__)
 

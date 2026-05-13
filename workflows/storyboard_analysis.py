@@ -40,10 +40,10 @@ from configs import RunConfig
 from llm.client import LLMClient, get_client
 from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, ingest_book
-from skills.extract_beats import BeatList
-from skills.extract_characters import Character, CharacterRoster
-from skills.extract_settings import Setting, SettingCollection
-from skills.storyboard_for_beat import Episode, ScreenplayAnalysis, storyboard_beat
+from agents.extract_beats import BeatList
+from agents.extract_characters import Character, CharacterRoster
+from agents.extract_settings import Setting, SettingCollection
+from agents.extract_storyboard import Episode, ScreenplayAnalysis, storyboard_beat
 from workflows import beat_analysis
 
 logger = logging.getLogger(__name__)

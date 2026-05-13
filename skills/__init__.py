@@ -1,11 +1,15 @@
-"""原生技能池(Native Skills)。
+"""skills:确定性原语池(deterministic primitives)。
 
-每个技能都是一个独立的子目录,包含三个文件:
+每个 skill 是一个独立子目录:
 
-  <name>/__init__.py   -- 重新导出对外的公共 API
-  <name>/logic.py      -- 纯 Python 实现,不调用任何 LLM
-  <name>/readme.md     -- 给 Agent 阅读的"秘籍"(契约说明)
+  <name>/__init__.py   -- 重导对外的公共 API
+  <name>/logic.py      -- 纯 Python 实现,**不调用任何 LLM**
+  <name>/schema.py     -- (可选)skill 的 I/O 数据契约
+  <name>/readme.md     -- (可选)契约说明
 
-可选的 ``skills/skills_manifest.json`` 是一个扁平索引,manager agent 在不
-导入具体模块的情况下,也能通过它了解可用技能的元数据。
+LLM-backed 的单元住在 ``agents/`` 而不是这里。两者通过 ``workflows/`` 编排到
+一起,workflow / agent 都可以使用 skill 做确定性工作。
+
+可选的 ``skills/skills_manifest.json`` 是一个扁平索引,在不导入具体模块的
+情况下也能通过它了解可用 skill 的元数据。
 """

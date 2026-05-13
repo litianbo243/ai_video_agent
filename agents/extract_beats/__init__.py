@@ -1,11 +1,11 @@
-"""extract_beats skill:单批剧情段增量抽取(1 次 LLM 调用)。
+"""extract_beats agent:单批剧情段增量抽取(1 次 LLM 调用)。
 
-LLM-backed skill。给定批次正文 + 此前最近 N 段 + 已知人物/场景,
-LLM 返回本批的剧情段 delta(可能新起若干段,也可能延续已有段)。
+给定批次正文 + 此前最近 N 段 + 已知人物/场景,LLM 返回本批的剧情段
+delta(可能新起若干段,也可能延续已有段)。
 
 公开 API::
 
-    from skills.extract_beats import (
+    from agents.extract_beats import (
         extract_for_batch, CONTEXT_WINDOW,
         Beat, BeatDraft, BeatList, BeatExtraction,
     )
@@ -15,8 +15,8 @@ LLM 返回本批的剧情段 delta(可能新起若干段,也可能延续已有�
     )
 """
 
-from skills.extract_beats.logic import CONTEXT_WINDOW, SYSTEM_PROMPT, extract_for_batch
-from skills.extract_beats.schema import (
+from agents.extract_beats.logic import CONTEXT_WINDOW, SYSTEM_PROMPT, extract_for_batch
+from agents.extract_beats.schema import (
     Beat,
     BeatDraft,
     BeatExtraction,

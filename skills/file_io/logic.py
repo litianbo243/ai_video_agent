@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from skills.extract_beats.schema import Beat
-from skills.extract_characters.schema import CharacterRoster
-from skills.extract_settings.schema import SettingCollection
+from agents.extract_beats.schema import Beat
+from agents.extract_characters.schema import CharacterRoster
+from agents.extract_settings.schema import SettingCollection
+from agents.extract_storyboard.schema import Episode
 from skills.file_io.schema import FinalReport
-from skills.storyboard_for_beat.schema import Episode
 
 
 def read_text_file(path: Path) -> str:

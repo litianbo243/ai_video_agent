@@ -1,4 +1,4 @@
-"""extract_settings skill 的全部数据契约。
+"""extract_settings agent 的全部数据契约。
 
 层次:
 
@@ -7,7 +7,7 @@
 * ``SettingCollection`` —— 一次 run 的全部场景
 * ``SettingExtraction`` —— 单次 LLM 调用的输出包装
 
-数据语义跟"这次 LLM 调用想抽什么"绑死,所以全部住在 skill 内部。
+数据语义跟"这次 LLM 调用想抽什么"绑死,所以全部住在 agent 内部。
 """
 
 from __future__ import annotations

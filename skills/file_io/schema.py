@@ -3,22 +3,22 @@
 ``write_final_report`` 接 ``FinalReport`` → 落 JSON + Markdown,
 ``FinalReport`` 是这次 run 全部产物的聚合容器:
 
-* 4 个 LLM-backed skill 的输出(``CharacterRoster`` / ``SettingCollection`` /
+* 4 个 agent 的输出(``CharacterRoster`` / ``SettingCollection`` /
   ``BeatList`` / ``ScreenplayAnalysis``)
 * 一次 run 的元信息(``ReportMeta``,无 LLM 调用,仅记录 input/output/llm/batch 等)
 
-字段类型从其它 skill 的 schema 直接 import,本 schema 是它们的"装配规范"。
-工作流(``workflows.novel_analysis``)按这个契约组装,落盘交给本 skill。
+字段类型从 ``agents/`` 下各自的 schema 直接 import,本 schema 是它们的
+"装配规范"。工作流(``workflows.novel_analysis``)按这个契约组装,落盘交给本 skill。
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel
 
-from skills.extract_beats.schema import BeatList
-from skills.extract_characters.schema import CharacterRoster
-from skills.extract_settings.schema import SettingCollection
-from skills.storyboard_for_beat.schema import ScreenplayAnalysis
+from agents.extract_beats.schema import BeatList
+from agents.extract_characters.schema import CharacterRoster
+from agents.extract_settings.schema import SettingCollection
+from agents.extract_storyboard.schema import ScreenplayAnalysis
 
 
 class ReportMeta(BaseModel):

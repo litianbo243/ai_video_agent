@@ -1,4 +1,4 @@
-"""storyboard_for_beat skill 的全部数据契约。
+"""extract_storyboard agent 的全部数据契约。
 
 层次由小到大:``Storyboard``(单镜) → ``Episode``(单集) → ``ScreenplayAnalysis``(全本剧本)。
 LLM 单次调用产出一集的分镜清单(``StoryboardList``),由 workflow 包装成 ``Episode``,
