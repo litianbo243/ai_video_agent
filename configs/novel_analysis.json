@@ -1,6 +1,6 @@
 {
-  "input": "input/斗破苍穹.epub",
-  "output_dir": "output",
+  "input": "inputs/斗破苍穹.epub",
+  "output_dir": "outputs",
   "max_batch_chars": 8000,
   "max_total_chars": 16000,
   "llm": {

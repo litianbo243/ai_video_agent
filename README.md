@@ -68,8 +68,8 @@ ai_video_agent/
 │   └── client.py                  # OpenAI 兼容客户端
 ├── configs/
 │   └── novel_analysis.json
-├── input/                         # 源材料,git ignore
-├── output/                        # 运行产物,git ignore
+├── inputs/                        # 源材料,git ignore
+├── outputs/                       # 运行产物,git ignore
 ├── run_workflow.py                # CLI 入口:在 __main__ 里选要跑哪个 workflow
 ├── requirements.txt
 └── .env.example
@@ -99,8 +99,8 @@ python run_workflow.py
 
 ```json
 {
-  "input": "input/your_novel.epub",
-  "output_dir": "output",
+  "input": "inputs/your_novel.epub",
+  "output_dir": "outputs",
   "max_batch_chars": 8000,
   "max_total_chars": 0,
   "target_episode_duration_sec": 180,

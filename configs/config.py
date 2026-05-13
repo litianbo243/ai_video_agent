@@ -3,8 +3,8 @@
 JSON 文件长这样::
 
     {
-      "input": "input/your_novel.epub",
-      "output_dir": "output",
+      "input": "inputs/your_novel.epub",
+      "output_dir": "outputs",
       "max_batch_chars": 8000,
       "max_total_chars": 0,
       "llm": {

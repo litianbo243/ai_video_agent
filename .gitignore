@@ -1,5 +1,5 @@
-input/
-output/
+inputs/
+outputs/
 temp/
 
 __pycache__/
