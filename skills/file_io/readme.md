@@ -15,16 +15,15 @@ from skills.file_io import (
 
 - `read_text_file(path)` —— `epub_to_txt` 之后(或者源文件本身就是 `.txt` 时直接调用);
 - `write_final_report(report, output_dir)` —— 整个 run 结束时调一次,`novel_analysis`
-  顶层 agent 在 4 个子-agent 跑完后调用。
+  顶层 agent 在 3 个子-agent 跑完后调用。
 
 ## 输出约定
 
 ```
 {output_dir}/
-├── screenplay.json / .md     # ScreenplayAnalysis
+├── screenplay.json / .md     # ScreenplayAnalysis(分集 + 每集分镜)
 ├── characters.json / .md     # CharacterRoster
-├── settings.json / .md       # SettingCollection
-├── beats.json / .md          # BeatList
+├── beats.json / .md          # BeatList(beat.setting_refs 是字符串 label,无独立档案)
 └── meta.json                 # ReportMeta
 ```
 

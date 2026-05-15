@@ -15,7 +15,12 @@ delta(可能新起若干段,也可能延续已有段)。
     )
 """
 
-from agents.extract_beats.logic import CONTEXT_WINDOW, SYSTEM_PROMPT, extract_for_batch
+from agents.extract_beats.logic import (
+    CONTEXT_WINDOW,
+    DEFAULT_CONTEXT_WINDOW,
+    SYSTEM_PROMPT,
+    extract_for_batch,
+)
 from agents.extract_beats.schema import (
     Beat,
     BeatDraft,
@@ -29,6 +34,7 @@ __all__ = [
     "BeatExtraction",
     "BeatList",
     "CONTEXT_WINDOW",
+    "DEFAULT_CONTEXT_WINDOW",
     "SYSTEM_PROMPT",
     "extract_for_batch",
 ]

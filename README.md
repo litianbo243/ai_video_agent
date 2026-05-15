@@ -1,6 +1,6 @@
 # ai_video_agent
 
-把一本中文小说(`.txt` 或 `.epub`)拆解成可直接驱动 AI 短视频生产的**剧本 / 人物 / 场景**结构化数据,JSON + Markdown 双格式同时输出。LLM 接任意 OpenAI 兼容端点(云上 / 本地 / 自建网关)。
+把一本中文小说(`.txt` 或 `.epub`)拆解成可直接驱动 AI 短视频生产的**剧本 / 人物 / 节拍**结构化数据,JSON + Markdown 双格式同时输出。LLM 接任意 OpenAI 兼容端点(云上 / 本地 / 自建网关)。
 
 这是 Stage 1(分析层),Stage 2/3 会基于本阶段产物做角色定调图、场景定调图、分镜出图、视频合成。
 
@@ -24,14 +24,14 @@ agent 之间不互相 import 运行逻辑;跨 agent 数据流靠 workflow state 
         │
         ▼  IngestResult(title, batches, ...)
    ┌────┴────────────────────────────────────────────────────────┐
-   │  4 个 agent,workflow 按依赖串调(character/setting 并行)     │
+   │  3 个 agent,workflow 按依赖串调                              │
    │                                                              │
    │  agents/extract_characters ─→ CharacterRoster               │
-   │  agents/extract_settings   ─→ SettingCollection             │
    │  agents/extract_beats      ─→ BeatList                      │
-   │       (依赖 roster + settings)                               │
+   │       (依赖 roster;场景 name 由本 agent 自己产出)            │
    │  agents/extract_storyboard ─→ ScreenplayAnalysis            │
-   │       (依赖 beats + roster + settings + batches,逐 beat 调) │
+   │       (依赖 beats + roster + batches,逐 beat 调一次 LLM;     │
+   │        场景视觉环境从原文 + LLM 常识写到每镜 description)      │
    └────────────────────────────────────────────────────────────┘
         │
         ▼
@@ -41,10 +41,13 @@ agent 之间不互相 import 运行逻辑;跨 agent 数据流靠 workflow state 
 {output_dir}/{YYYYMMDD_HHMMSS}/    每次运行新建带时间戳的子目录
 ├── screenplay.json / .md          剧本分析(logline + 分集 episodes + 分镜 storyboards)
 ├── characters.json / .md          人物档案(含详细外貌 + 性格,给 Stage 2 做角色定调图)
-├── settings.json / .md            场景档案(物理地点视觉描写,跨剧情段复用,给 Stage 2 做场景定调图)
-├── beats.json / .md               剧情大纲段(含节奏 + setting_refs + character_refs)
+├── beats.json / .md               剧情大纲段(含节奏 + setting_refs 字符串 label + character_refs)
 └── meta.json                      运行元信息(书名 / 字数 / 批次数 / LLM)
 ```
+
+> **场景的处理:** 本工程不维护独立的场景视觉档案。Beat 内 ``setting_refs`` 是字符串
+> label(如「萧家大厅」),用于跨集场景一致性;每镜的视觉环境由 storyboard agent 从
+> 原文 + LLM 常识写到 ``Storyboard.description`` 里。
 
 每个 workflow 都可以**单独跑**(见 [run_workflow.py](run_workflow.py));workflow 内部会按需调起依赖的上游 workflow 或 agent。MCP 是预留给*外部*服务的 —— 详见 [`mcp_connectors/README.md`](mcp_connectors/README.md)。
 
@@ -57,9 +60,8 @@ ai_video_agent/
 │   │   ├── __init__.py            #   重导公共 API + schema
 │   │   ├── logic.py               #   SYSTEM_PROMPT + chat_json + 后处理
 │   │   └── schema.py              #   I/O 契约(Character / Roster / Extraction)
-│   ├── extract_settings/
-│   ├── extract_beats/             # 依赖 character + setting schema
-│   └── extract_storyboard/        # 依赖前三个 schema;单 beat → 一集分镜
+│   ├── extract_beats/             # 依赖 character schema;场景 name 由本 agent 产出
+│   └── extract_storyboard/        # 依赖前两个 schema;单 beat → 一集分镜
 ├── skills/                        # 确定性原语,不调 LLM
 │   ├── epub_to_txt/
 │   ├── batch_chapters/
@@ -68,8 +70,7 @@ ai_video_agent/
 │   └── skills_manifest.json
 ├── workflows/                     # LangGraph DAG,组合 agent + skill
 │   ├── character_analysis.py
-│   ├── setting_analysis.py
-│   ├── beat_analysis.py           # 内部并行 char + setting,再串到 beat
+│   ├── beat_analysis.py           # 内部跑 character,再串到 beat
 │   ├── storyboard_analysis.py     # 内部跑 beat_analysis,逐 beat 调 storyboard agent
 │   └── novel_analysis.py          # 顶层:全跑一遍,落 FinalReport
 ├── configs/
@@ -104,7 +105,7 @@ cp .env.example .env  # 只用本地推理(ollama 等)时此步可跳过
 python run_workflow.py
 ```
 
-> 配置文件路径和要跑的 workflow 都在 [`run_workflow.py`](run_workflow.py) 末尾 `__main__` 里写死,改对应那两行即可。默认跑 ``run_novel_analysis``(全流程),注释切换到 ``run_character_analysis`` / ``run_setting_analysis`` 可单独跑子-workflow。
+> 配置文件路径和要跑的 workflow 都在 [`run_workflow.py`](run_workflow.py) 末尾 `__main__` 里写死,改对应那两行即可。默认跑 ``run_novel_analysis``(全流程),注释切换到 ``run_character_analysis`` / ``run_beat_analysis`` / ``run_storyboard_analysis`` 可单独跑子-workflow。
 
 ### config 结构
 
@@ -222,7 +223,7 @@ print(result.output_paths)
 ```python
 from configs import load_config
 from workflows import (
-    character_analysis, setting_analysis,
+    character_analysis,
     beat_analysis, storyboard_analysis, novel_analysis,
 )
 
@@ -231,22 +232,21 @@ config = load_config("configs/novel_analysis.json")
 # 只要人物
 ing, roster = character_analysis.run(config)
 
-# 只要分镜(内部会先跑 character + setting + beat)
-ing, roster, settings, beats, screenplay = storyboard_analysis.run(config)
+# 只要分镜(内部会先跑 character + beat)
+ing, roster, beats, screenplay = storyboard_analysis.run(config)
 
 # 全跑
 result = novel_analysis.run(config)  # 落 screenplay.json/.md + characters.json/.md + ... + meta.json
 ```
 
-`run_workflow.py` 末尾 `__main__` 里 5 个函数对应 5 个 workflow,改一行选哪个跑。
+`run_workflow.py` 末尾 `__main__` 里 4 个函数对应 4 个 workflow,改一行选哪个跑。
 
 依赖关系一图流(workflow 内部自动满足):
 
 | Workflow | 直接依赖的 agent / 上游 workflow |
 |---|---|
 | `character_analysis` | `agents/extract_characters` |
-| `setting_analysis` | `agents/extract_settings` |
-| `beat_analysis` | character_analysis + setting_analysis + `agents/extract_beats` |
+| `beat_analysis` | character_analysis + `agents/extract_beats` |
 | `storyboard_analysis` | beat_analysis + `agents/extract_storyboard` |
 | `novel_analysis` | 上面全部 + `skills/file_io.write_final_report` |
 

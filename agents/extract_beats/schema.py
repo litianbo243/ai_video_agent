@@ -3,11 +3,19 @@
 层次:
 
 * ``BeatDraft``      —— LLM 直接产出的初稿(无 ``index`` / ``related_batches``)
-* ``Beat``           —— 合并后完整的剧情段(含 ``index`` / ``related_batches``)
+* ``Beat``           —— 合并后完整的剧情段(含 ``index`` / ``related_batches`` / ``is_open``)
 * ``BeatList``       —— 一次 run 的全部剧情段
-* ``BeatExtraction`` —— 单次 LLM 调用的输出包装(新段 + 延续段)
+* ``BeatExtraction`` —— 单次 LLM 调用的输出包装(新段 + 延续段 + last_beat_open)
 
 数据语义跟"这次 LLM 调用想抽什么"绑死,所以全部住在 agent 内部。
+
+**schema description 写作原则**(给后续维护者):
+
+* description 只讲"字段是什么 / 怎么填 / 一个微例",**不讲决策规则**——
+  决策规则的权威源是 ``logic.py:SYSTEM_PROMPT_TEMPLATE``,在 description 里复述
+  会让 LLM 注意力分散、以后改一处忘改另一处。
+* 不用 markdown(``**bold**`` / ``- bullets``),纯文本中文模型友好。
+* 1-2 行能讲完的别写 5 行。
 """
 
 from __future__ import annotations
@@ -18,41 +26,43 @@ from pydantic import BaseModel, Field
 
 
 class BeatDraft(BaseModel):
-    """LLM 抽取剧情段的输出契约(无 ``index`` / ``related_batches``,这两个 merge 自动填)。"""
+    """剧情大纲段的 LLM 初稿。一段 ≈ 一集短视频。"""
 
-    title: str = Field(..., description='剧情段标题,如"撕婚约"、"测验失败"')
+    title: str = Field(
+        ...,
+        description="剧情段标题,2-6 字,只描述事件不含地点。例:撕婚约。",
+    )
     summary: str = Field(
         default="",
-        description="本段剧情概要(2-4 句),要交代起承转合 + 关键节奏点(小高潮)",
+        description="1-2 句话:谁在哪、做了什么、转折是什么。不抄原文台词。",
     )
     setting_refs: List[str] = Field(
         default_factory=list,
-        description="本段涉及的场景(Setting.name 列表),按时序排列,可多个",
+        description=(
+            "本段涉及的场景 name 列表,按时序。"
+            "已用过的 name 沿用不改字;新地点用「宅院/机构+房间」组合(如「萧家大厅」)。"
+            "纯心理活动留空。"
+        ),
     )
     character_refs: List[str] = Field(
         default_factory=list,
-        description="本段涉及的人物(Character.name 列表)",
+        description="本段所有出场人物的 name(不只有台词的)。必须出自 prompt 里的人物名录。",
     )
 
 
 class Beat(BeatDraft):
-    """完整的剧情大纲段(state 内部 + 落盘格式)。
+    """完整剧情大纲段(workflow 内部 + 落盘格式)。"""
 
-    比 ``BeatDraft`` 多两个 merge 时自动填的字段:
-    * ``index``:全局编号(稳定主键)
-    * ``related_batches``:涉及的 batch(支持跨批延续)
-
-    一个 Beat 可以涉及多个 Setting / Character,**也可能跨多个 batch**(冲突跨批
-    时由后续 batch 的 extractor 把当前 batch 追加到 ``related_batches``)。
-    storyboard_analysis 会遍历 ``related_batches`` 把所有相关原文拼起来。
-    """
-
-    index: int = Field(default=0, description="全局编号(1-based,merge 时自动赋值)")
+    index: int = Field(default=0, description="全局编号,1-based。")
     related_batches: List[int] = Field(
         default_factory=list,
+        description="该段涉及的 batch 编号列表,1-based 按时序。",
+    )
+    is_open: bool = Field(
+        default=False,
         description=(
-            "该段涉及的 batch 编号列表(1-based,按时序)。"
-            "merge 时自动追加当前 batch;通常为 1-3 个 batch。"
+            "本段是否还开着、等下一 batch 续写。"
+            "全书任意时刻最多 1 个段 is_open=True。"
         ),
     )
 
@@ -62,19 +72,27 @@ class BeatList(BaseModel):
 
 
 class BeatExtraction(BaseModel):
-    """LLM 单批输出:本批的剧情段增量。
+    """单次 LLM 调用的输出包装,三条通道协同(new_beats / continues_open_beat / last_beat_open)。"""
 
-    两条通道:
-    * ``new_beats``:本批中**新起**的剧情段(典型情况)
-    * ``extended_beat_indices``:本批是**已有段的延续**(跨批高潮 / 长冲突),
-      给出对应 Beat.index;merge 时自动把本批 batch 追加到它们的
-      ``related_batches``,不新建 Beat。
-    """
-
-    new_beats: List[BeatDraft] = Field(default_factory=list)
-    extended_beat_indices: List[int] = Field(
+    new_beats: List[BeatDraft] = Field(
         default_factory=list,
-        description="本批延续了哪几个已有段(给已有段的 index)",
+        description="本批中新起的剧情段(0-3 段)。",
+    )
+    continues_open_beat: bool = Field(
+        default=False,
+        description=(
+            "本批是否在续写 prompt 里那个标 [待续] 的段?"
+            "true 把本 batch 加到那段的 related_batches;false 让它被自动收束。"
+            "prompt 里没 [待续] 段时保持 false。"
+        ),
+    )
+    last_beat_open: bool = Field(
+        default=False,
+        description=(
+            "本批新写的最后一段(new_beats 末尾)是否未到自然收束?"
+            "true 让下一批续写它;false 表示已收束。"
+            "new_beats 为空时此字段无意义,保持 false。"
+        ),
     )
 
 

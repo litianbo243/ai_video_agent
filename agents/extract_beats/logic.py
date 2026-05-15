@@ -1,71 +1,85 @@
 """单批剧情段抽取:一次 LLM 调用,返回本批增量。
 
-合并(新段赋 index、延续段追加 related_batches)放在 ``manager.py``。
+合并(新段赋 index、延续段追加 related_batches)放在 ``workflows/beat_analysis.py``。
+
+prompt 上下文:
+
+* 人物:Tier 1 全员名录(name + 别名) + Tier 2 本批相关详档(`character_refs` 必须取自此名录)
+* 场景:**仅 name 集合**——本工程不维护场景视觉档案(那是 storyboarder 用原文 + LLM
+  常识写到每镜 description 里的事)。这里给 beat agent 看历史 name 集只是为了让它
+  对同一物理地点**沿用同一个 name**(避免"萧家大厅"和"萧家议事厅"指同一处)。
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Set
 
 from llm.client import LLMClient
 from skills.batch_chapters import Batch
 from agents.extract_beats.schema import Beat, BeatExtraction
 from agents.extract_characters.schema import Character
-from agents.extract_settings.schema import Setting
 
 logger = logging.getLogger(__name__)
 
 
-CONTEXT_WINDOW = 10  # 给 LLM 喂多少段最近的 beats 作为节奏接续上下文
+DEFAULT_CONTEXT_WINDOW = 10  # ``RunConfig.recent_beats_window`` 的兜底值
+
+# 向后兼容别名:旧代码 / 测试可能 import 这个名字。新代码请从 RunConfig 取。
+CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW
 
 
-SYSTEM_PROMPT = """\
-你是中文长篇小说改编编剧,负责把小说切成一段段"剧情大纲段"(Beat)。
-每段后续会被独立改编为一集 ~3 分钟的短视频(分镜 25 个左右),所以每段必须:
-- 有完整的起承转合,**至少一个小高潮**(冲突 / 决断 / 反转 / 情绪爆发);
-- 不是单一动作或独白;
-- 不是过渡水分内容。
+SYSTEM_PROMPT_TEMPLATE = """\
+你是中文小说改编编剧。把小说切成 Beat(剧情段),每段对应一集 ~{target_minutes} 分钟视频({target_duration} 秒)。
 
-工作模式: 增量分析。
-- 每次只看一批章节正文 + 此前最近 N 段大纲(节奏衔接用)+ 已知人物 / 已知场景;
-- 输出**本批的剧情段 delta**:可能是新起几段,也可能是延续已有段。
+每段要求:
+- 有戏剧分量:冲突 / 决断 / 反转 / 情绪爆发 / 重要发现
+- 不是单一动作、独白、过渡水分
+- 粒度撑得起 ~{target_minutes} 分钟:太碎 → 合并,太重 → 拆分
 
-────────────────────────────────────────────────
-你有两条输出通道(都可空,也可同时用):
+输出 BeatExtraction(JSON),三个字段:
 
-【1】new_beats: 本批**新起**的剧情段(典型情况)
-每个 Beat 字段:
-- title: 简短剧情标题,如"撕婚约"、"测验失败"、"初会药老"(不含地点修饰)
-- summary: **本段剧情摘要,2-4 句**,要交代起承转合 + 关键节奏点(小高潮)
-    例:"萧炎到萧家祠堂迎接前来退婚的纳兰嫣然。纳兰嫣然冷漠陈述退婚理由,
-    萧炎反讽对方功利;两人当众撕毁婚约,萧炎冲出祠堂立誓三年内击败纳兰一族。"
-- setting_refs: **本段涉及的场景**(Setting.name 列表),按时序排列,可多个
-    必须用 [已知场景名单] 中已存在的 name(原样复制),不要造新名
-- character_refs: **本段涉及的人物**(Character.name 列表)
-    所有出场人物都要列(不只是有台词的);必须用 [已知人物名单] 里已有的 name
+1. new_beats: 本批新起的段(0-3 段)
+   - title: 2-6 字事件标题,不含地点。例:撕婚约
+   - summary: 1-2 句,讲清「谁在哪 / 做了什么 / 转折是什么」。不抄原文台词
+   - setting_refs: 涉及场景 name。已用过的沿用不改字;新地点用「宅院/机构+房间」组合(如「萧家大厅」),禁止裸名(「大厅」「广场」)
+   - character_refs: 所有出场人物 name,必须出自人物名录
 
-【2】extended_beat_indices: 本批**延续**已有段
-- 如果你判断本批正文是上一段(或更早)beat 的延续(剧情还没收尾),
-  **不要新建** Beat,而是把对应 Beat 的 index 放进 extended_beat_indices。
-- 系统会自动把当前 batch 追加到该 Beat 的 related_batches。
-- 典型场景:跨批的长冲突 / 大战 / 长心理活动,光是一批装不下整段戏。
-- 一批可以同时延续 1 个段 + 新起若干段(常见:批头是上段尾声,批中后是新段)。
+2. continues_open_beat (bool): prompt 里若有标 [待续] 的段,本批是否在续写它?
+   - 没 [待续] 段 → 一律 false
+   - false 时禁止在 new_beats 里复制 [待续] 段的内容
 
-注意:Beat 不要存台词原文。下游 storyboarder 会按 related_batches 回查原文,
-直接从原文里挑选 / 改编台词,你这里只需要给出剧情骨架 + 引用关系。
+3. last_beat_open (bool): new_beats 末尾段是否戛然而止还没结束?
+   - 戛然而止(打斗未分胜负 / 长对话未决断)→ true,下一批续写
+   - 自然收束(胜败已定 / 散场)→ false
+   - new_beats 为空 → false
 
-────────────────────────────────────────────────
-切分规则(关键!):
-- 一批 8K 字一般产 1-3 段(看剧情密度);**冲突连续的段不要硬拆**
-- 不重要的过渡内容**不要单独成段**(可以并入相邻段或省略)
-- 不要造段:本批没有戏剧张力的部分,宁可不输出 Beat,也不要凑数
-- 参考 [此前最近 N 段大纲] 的节奏,与之**自然衔接**
-- 避免连续两段节奏雷同(都是打斗 / 都是对话)
+[待续] 段决策矩阵(prompt 里有 [待续] 段时,4 选 1):
+- 接着写 + 再开新段 → continues=true, new_beats=[新段]
+- 只接着写         → continues=true, new_beats=[]
+- 不接,只新写     → continues=false, new_beats=[新段]
+- 啥也没干         → continues=false, new_beats=[]
 
-────────────────────────────────────────────────
-严格按 JSON Schema 输出 BeatExtraction,只输出一个 JSON 对象。
+切分规则:
+- 一批 8K 字典型 1-3 段;没张力宁可空输出
+- 避免连续两段节奏雷同(都打斗 / 都对话)
+
+只输出 JSON。
 """
+
+
+def _build_system_prompt(target_duration_sec: int) -> str:
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        target_duration=target_duration_sec,
+        target_minutes=round(target_duration_sec / 60, 1)
+        if target_duration_sec % 60
+        else target_duration_sec // 60,
+    )
+
+
+# 默认 prompt(180s = 3 分钟),供单元测试 / notebook 直接看 prompt 文本时用。
+# 真实运行链路一律走 ``_build_system_prompt(target_duration_sec)``。
+SYSTEM_PROMPT = _build_system_prompt(180)
 
 
 def _render_recent_beats(beats: List[Beat], window: int) -> str:
@@ -75,7 +89,9 @@ def _render_recent_beats(beats: List[Beat], window: int) -> str:
     parts: List[str] = []
     for b in recent:
         batches_str = ",".join(str(x) for x in b.related_batches) or "?"
-        line = f"段 {b.index} (batch {batches_str}) · {b.title}"
+        # is_open 段加 [待续] 标记,prompt 里的"决策矩阵"会引导 LLM 处理
+        flag = " **[待续:上一批末尾未完成,本批承接的话置 continues_open_beat=true]**" if b.is_open else ""
+        line = f"段 {b.index} (batch {batches_str}) · {b.title}{flag}"
         if b.summary:
             line += f"\n  {b.summary}"
         parts.append(line)
@@ -84,53 +100,112 @@ def _render_recent_beats(beats: List[Beat], window: int) -> str:
     return "\n".join(parts)
 
 
-def _condense_names(names: List[str]) -> str:
+def _render_name_index(names: List[str]) -> str:
     if not names:
         return "(暂无)"
     return "\n".join(f"- {n}" for n in names)
+
+
+def _scan_relevant_chars(text: str, chars: Dict[str, Character]) -> List[Character]:
+    out: List[Character] = []
+    for ch in chars.values():
+        keys = [ch.name, *ch.aliases]
+        if any(k and len(k) >= 2 and k in text for k in keys):
+            out.append(ch)
+    return out
+
+
+def _render_char_profile(ch: Character) -> str:
+    section = [f"### {ch.name}"]
+    if ch.aliases:
+        section.append(f"别名: {', '.join(ch.aliases)}")
+    if ch.personality:
+        section.append(f"性格: {ch.personality}")
+    return "\n".join(section)
 
 
 def _build_user_prompt(
     batch: Batch,
     beats_so_far: List[Beat],
     characters: Dict[str, Character],
-    settings: Dict[str, Setting],
+    setting_names: Set[str],
     title: str,
-) -> str:
-    recent = _render_recent_beats(beats_so_far, CONTEXT_WINDOW)
-    chars = _condense_names(list(characters.keys()))
-    setts = _condense_names(list(settings.keys()))
+    *,
+    context_window: int,
+) -> tuple[str, int]:
+    """返回 (prompt, 命中人物数)。"""
     book_title = title or "(未提供书名)"
-    return (
-        f"书名: {book_title}\n"
-        f"批次序号: 第 {batch.index} 批\n"
-        f"批次字数: 约 {batch.char_count}\n\n"
-        f"=== 此前最近 {CONTEXT_WINDOW} 段剧情大纲(节奏接续) ===\n{recent}\n\n"
-        f"=== 已知人物名单(character_refs 必须用这里的 name)===\n{chars}\n\n"
-        f"=== 已知场景名单(setting_refs 必须用这里的 name)===\n{setts}\n\n"
-        f"=== 本批次正文 ===\n{batch.render_for_prompt()}\n\n"
-        f"=== 任务 ===\n请按 JSON Schema 输出 BeatExtraction。"
+    batch_text = batch.render_for_prompt()
+    recent = _render_recent_beats(beats_so_far, context_window)
+    char_index = _render_name_index(list(characters.keys()))
+    setting_index = _render_name_index(sorted(setting_names))
+
+    relevant_chars = _scan_relevant_chars(batch_text, characters)
+    char_profiles = (
+        "\n\n".join(_render_char_profile(c) for c in relevant_chars)
+        if relevant_chars
+        else "(本批未匹配到已知人物)"
     )
+
+    prompt = (
+        f"书名: {book_title} | 第 {batch.index} 批\n\n"
+        f"=== 此前最近 {context_window} 段大纲 ===\n{recent}\n\n"
+        f"=== 人物名录({len(characters)} 人,character_refs 必须从这里取)===\n"
+        f"{char_index}\n\n"
+        f"=== 已用过的场景 name({len(setting_names)} 处,同一地点沿用)===\n"
+        f"{setting_index}\n\n"
+        f"=== 本批相关人物详档({len(relevant_chars)} 人,辅助理解)===\n"
+        f"{char_profiles}\n\n"
+        f"=== 本批正文 ===\n{batch_text}\n\n"
+        f"输出 BeatExtraction JSON。"
+    )
+    return prompt, len(relevant_chars)
 
 
 def extract_for_batch(
     batch: Batch,
     beats_so_far: List[Beat],
     characters: Dict[str, Character],
-    settings: Dict[str, Setting],
+    setting_names: Set[str],
     llm: LLMClient,
     *,
     title: str = "",
+    target_duration_sec: int = 180,
+    context_window: int = DEFAULT_CONTEXT_WINDOW,
 ) -> BeatExtraction:
-    """对单个 batch 调一次 LLM,返回剧情段增量。"""
-    user_prompt = _build_user_prompt(batch, beats_so_far, characters, settings, title)
-    logger.info(
-        "beat_extractor 第 %d 批(此前 %d 段),%s @ %s",
-        batch.index, len(beats_so_far), llm.model, llm.base_url,
+    """对单个 batch 调一次 LLM,返回剧情段增量。
+
+    ``setting_names`` 是历史 batch 已经用过的场景 name 集合,只作为"沿用提示"
+    传给 LLM。本工程不维护场景视觉档案——视觉环境由 storyboarder 从原文 + LLM
+    常识写到每镜的 description 里。
+
+    ``target_duration_sec`` 来自 ``RunConfig.target_episode_duration_sec``,
+    用于让 LLM 把 beat 粒度跟单集时长对齐(切粒度太碎 / 太重都会反作用于
+    storyboarder 出镜数 / 单镜时长)。
+
+    ``context_window`` 来自 ``RunConfig.recent_beats_window``,控制 prompt 里
+    展示「此前最近 N 段大纲」的窗口大小。小模型 ctx 紧时调低,大模型可调高。
+    """
+    system = _build_system_prompt(target_duration_sec)
+    user_prompt, rel_chars = _build_user_prompt(
+        batch, beats_so_far, characters, setting_names, title,
+        context_window=context_window,
     )
-    delta = llm.chat_json(SYSTEM_PROMPT, user_prompt, BeatExtraction)
+    logger.info(
+        "beat_extractor 第 %d 批(此前 %d 段 / 窗口 %d;本批关联 %d 人;"
+        "场景 name 池 %d;目标集时长 %ds),%s @ %s",
+        batch.index, len(beats_so_far), context_window, rel_chars,
+        len(setting_names), target_duration_sec, llm.model, llm.base_url,
+    )
+    delta = llm.chat_json(system, user_prompt, BeatExtraction)
     logger.info("beat_extractor 第 %d 批产出:%d 段", batch.index, len(delta.new_beats))
     return delta
 
 
-__all__ = ["extract_for_batch", "SYSTEM_PROMPT", "CONTEXT_WINDOW"]
+__all__ = [
+    "extract_for_batch",
+    "SYSTEM_PROMPT",
+    "SYSTEM_PROMPT_TEMPLATE",
+    "CONTEXT_WINDOW",
+    "DEFAULT_CONTEXT_WINDOW",
+]

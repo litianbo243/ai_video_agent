@@ -12,7 +12,6 @@ from pathlib import Path
 
 from agents.extract_beats.schema import Beat
 from agents.extract_characters.schema import CharacterRoster
-from agents.extract_settings.schema import SettingCollection
 from agents.extract_storyboard.schema import Episode
 from skills.file_io.schema import FinalReport
 
@@ -28,8 +27,8 @@ def read_text_file(path: Path) -> str:
 def write_final_report(report: FinalReport, output_dir: Path) -> dict:
     """把最终报告同时落成 JSON 与 Markdown。
 
-    返回写入的 9 个路径:
-    ``{screenplay_json/md, characters_json/md, settings_json/md, beats_json/md, meta_json}``。
+    返回写入的 7 个路径:
+    ``{screenplay_json/md, characters_json/md, beats_json/md, meta_json}``。
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -39,8 +38,6 @@ def write_final_report(report: FinalReport, output_dir: Path) -> dict:
         "screenplay_md":    out / "screenplay.md",
         "characters_json":  out / "characters.json",
         "characters_md":    out / "characters.md",
-        "settings_json":    out / "settings.json",
-        "settings_md":      out / "settings.md",
         "beats_json":       out / "beats.json",
         "beats_md":         out / "beats.md",
         "meta_json":        out / "meta.json",
@@ -48,13 +45,11 @@ def write_final_report(report: FinalReport, output_dir: Path) -> dict:
 
     paths["screenplay_json"].write_text(report.screenplay.model_dump_json(indent=2), encoding="utf-8")
     paths["characters_json"].write_text(report.characters.model_dump_json(indent=2), encoding="utf-8")
-    paths["settings_json"].write_text(report.settings.model_dump_json(indent=2), encoding="utf-8")
     paths["beats_json"].write_text(report.beats.model_dump_json(indent=2), encoding="utf-8")
     paths["meta_json"].write_text(report.meta.model_dump_json(indent=2), encoding="utf-8")
 
     paths["screenplay_md"].write_text(_render_screenplay_md(report), encoding="utf-8")
     paths["characters_md"].write_text(_render_characters_md(report.characters), encoding="utf-8")
-    paths["settings_md"].write_text(_render_settings_md(report.settings), encoding="utf-8")
     paths["beats_md"].write_text(_render_beats_md(report.beats.beats), encoding="utf-8")
 
     return {k: str(v) for k, v in paths.items()}
@@ -129,19 +124,6 @@ def _render_episode_md(ep: Episode) -> list:
                     out.append(f"- 镜{sb.index} 旁白: {sb.voiceover}")
     out.append("")
     return out
-
-
-def _render_settings_md(coll: SettingCollection) -> str:
-    parts: list = ["# 场景档案\n"]
-    if not coll.settings:
-        return parts[0] + "\n_(无场景条目)_\n"
-    for s in coll.settings:
-        parts.append(f"## #{s.index} · {s.name}")
-        parts.append("")
-        if s.description:
-            parts.append(s.description)
-        parts.append("")
-    return "\n".join(parts).rstrip() + "\n"
 
 
 def _render_beats_md(beats: list[Beat]) -> str:

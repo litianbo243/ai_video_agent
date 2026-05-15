@@ -69,10 +69,17 @@ def _merge(known: Dict[str, Character], delta: CharacterExtraction) -> None:
     """同名 → 融合;新名 → 新增并赋全局 index。
 
     aliases 取并集;appearance / personality 非空才覆盖。
+    新人物若三大字段全空(LLM 凑出来的空壳),跳过不建档 + warn。
     """
     for draft in delta.new_or_updated_characters:
         existing = known.get(draft.name)
         if existing is None:
+            if not draft.appearance and not draft.personality and not draft.aliases:
+                logger.warning(
+                    "[character_analysis] 跳过空壳新人物 name=%r(无外貌/性格/别名)",
+                    draft.name,
+                )
+                continue
             ch = Character(**draft.model_dump(), index=len(known) + 1)
             known[draft.name] = ch
             continue

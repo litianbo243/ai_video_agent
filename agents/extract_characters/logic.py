@@ -1,6 +1,14 @@
 """单批人物抽取:一次 LLM 调用,返回本批增量。
 
 合并(同名融合、新增赋 index)放在 ``manager.py``,这里只负责 prompt + LLM 调用。
+
+prompt 上下文采用**两层 index**:
+
+* Tier 1 全员名录(name + 别名,所有已知人物)
+  —— 让 LLM 知道"宇宙边界",防止把别名 / 称谓误认成新角色
+* Tier 2 本批相关详档(name + aliases + appearance + personality,仅 substring
+  扫到的子集)
+  —— 让 LLM 判断"appearance / personality 是否需要更新"时有真实对比基准
 """
 
 from __future__ import annotations
@@ -16,38 +24,29 @@ logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """\
-你是中文长篇小说的人物抽取助手,正在为下游 AI 短视频生产管线构建结构化数据。
+你是中文小说人物抽取助手。增量分析:看一批正文 + 全员名录 + 本批相关详档,输出本批 delta。
 
-工作模式: 增量分析。
-- 每次只看一批章节正文 + 此前已知的人物名单;
-- 输出"本批次产生的变化"(delta), 不重写已经分析过的章节。
+字段(每个出场人物):
+- name: 规范化中文姓名(主名;别号进 aliases)
+- aliases: 本批新出现的别名 / 称谓 / 外号
+- appearance: 150-300 字整段外貌(性别 + 年龄 + 身材 + 发型发色 + 眼睛 + 服饰 + 标志特征 + 气质)
+- personality: 150-300 字整段性格(行为模式 + 价值观 + 情感倾向 + 弧光)
 
-────────────────────────────────────────────────
-对每个出场人物,产出:
-- name: 规范化的中文姓名(主人物以正名,别号外号放进 aliases)
-- aliases: 该批次出现的别名 / 称谓 / 外号
-- appearance: **整段外貌描写,150-300 字**
-    含性别 + 年龄段 + 身材 + 发型发色 + 眼睛特征 + 服饰风格 + 标志性配饰 + 整体气质
-    例:"16 岁少年,身材瘦削挺拔,黑色短发自然垂落耳际,深邃黑眸常带倔强神色,
-    常着青色粗布长袍,左手中指戴一枚乌黑纳戒,气质冷峻略带锋芒。"
-- personality: **整段性格分析,150-300 字**
-    含行为模式 + 价值观 + 情感倾向 + 弧光走向
+规则:
+- 名录里的角色沿用同名,不改名
+- 详档里的人物:appearance / personality 留空 = 不更新;
+  仅当本批描写比详档更细才填**完整新版**(整段覆盖,不要差量)
+- aliases 只列本批新出现的
+- 本批的称谓 / 别名若能对应名录某 name → 沿用那 name,称谓加进 aliases,不新建
+- 路人(单次出场、无戏剧作用)不输出
+- 没依据的字段留空,不杜撰
 
-────────────────────────────────────────────────
-合并规则:
-- 已在 [此前已知人物名单] 中的角色,**沿用同名,不要改名**
-- 仅在你发现新信息(外貌细节 / 性格转变 / 新别名)的老角色才输出更新;
-  - appearance / personality:**只在你看到比之前更详细的描写时才填**;否则留空 = 不更新
-  - aliases:只列本批新出现的别名,merge 时会与旧别名取并集
-- 路人角色(只出场一次、无名 / 无戏剧作用)**不要**输出
-- 绝不杜撰: 没有依据的字段直接留空
-
-────────────────────────────────────────────────
-严格按 JSON Schema 输出 CharacterExtraction,只输出一个 JSON 对象。
+只输出一个 JSON 对象,符合 CharacterExtraction schema。
 """
 
 
-def _condense_known_roster(known: Dict[str, Character]) -> str:
+def _render_roster_index(known: Dict[str, Character]) -> str:
+    """Tier 1 全员名录:name + 前 3 别名,1 行/人。"""
     if not known:
         return "(暂无)"
     items: List[str] = []
@@ -55,21 +54,59 @@ def _condense_known_roster(known: Dict[str, Character]) -> str:
         bits = [ch.name]
         if ch.aliases:
             bits.append("别名:" + "/".join(ch.aliases[:3]))
-        items.append(" ".join(bits))
-    return "\n".join("- " + s for s in items)
+        items.append("- " + " ".join(bits))
+    return "\n".join(items)
 
 
-def _build_user_prompt(batch: Batch, known: Dict[str, Character], title: str) -> str:
-    roster = _condense_known_roster(known)
+def _scan_relevant(text: str, known: Dict[str, Character]) -> List[Character]:
+    """Tier 2 候选筛选:name / aliases 在 batch 正文里出现即算相关。
+
+    约束:单字 key 不参与(避免"云" / "风"误匹配)。
+    """
+    relevant: List[Character] = []
+    for ch in known.values():
+        keys = [ch.name, *ch.aliases]
+        if any(k and len(k) >= 2 and k in text for k in keys):
+            relevant.append(ch)
+    return relevant
+
+
+def _render_full_profile(ch: Character) -> str:
+    section = [f"### {ch.name}"]
+    if ch.aliases:
+        section.append(f"别名: {', '.join(ch.aliases)}")
+    if ch.appearance:
+        section.append(f"外貌: {ch.appearance}")
+    if ch.personality:
+        section.append(f"性格: {ch.personality}")
+    return "\n".join(section)
+
+
+def _build_user_prompt(
+    batch: Batch, known: Dict[str, Character], title: str,
+) -> tuple[str, int]:
+    """返回 (prompt, 命中详档人数);命中数让上层 logger 用,免得重复扫一遍。"""
     book_title = title or "(未提供书名)"
-    return (
+    batch_text = batch.render_for_prompt()
+    roster_index = _render_roster_index(known)
+    relevant = _scan_relevant(batch_text, known)
+    profiles = (
+        "\n\n".join(_render_full_profile(c) for c in relevant)
+        if relevant
+        else "(本批未匹配到已知人物;可能全是新角色)"
+    )
+    prompt = (
         f"书名: {book_title}\n"
         f"批次序号: 第 {batch.index} 批\n"
         f"批次字数: 约 {batch.char_count}\n\n"
-        f"=== 此前已知人物名单 ===\n{roster}\n\n"
-        f"=== 本批次正文 ===\n{batch.render_for_prompt()}\n\n"
+        f"=== 全部已知人物名录(共 {len(known)} 人;仅名 + 别名,用于防重名)===\n"
+        f"{roster_index}\n\n"
+        f"=== 本批可能涉及的人物详档(共 {len(relevant)} 人;"
+        f"按 name / 别名扫描命中)===\n{profiles}\n\n"
+        f"=== 本批次正文 ===\n{batch_text}\n\n"
         f"=== 任务 ===\n请按 JSON Schema 输出 CharacterExtraction。"
     )
+    return prompt, len(relevant)
 
 
 def extract_for_batch(
@@ -80,10 +117,10 @@ def extract_for_batch(
     title: str = "",
 ) -> CharacterExtraction:
     """对单个 batch 调一次 LLM,返回人物增量(不在此处合并)。"""
-    user_prompt = _build_user_prompt(batch, known, title)
+    user_prompt, relevant_count = _build_user_prompt(batch, known, title)
     logger.info(
-        "character_extractor 第 %d 批(已知 %d 人),%s @ %s",
-        batch.index, len(known), llm.model, llm.base_url,
+        "character_extractor 第 %d 批(已知 %d 人,本批关联详档 %d 人),%s @ %s",
+        batch.index, len(known), relevant_count, llm.model, llm.base_url,
     )
     delta = llm.chat_json(SYSTEM_PROMPT, user_prompt, CharacterExtraction)
     logger.info(

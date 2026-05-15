@@ -3,59 +3,68 @@
 层次由小到大:``Storyboard``(单镜) → ``Episode``(单集) → ``ScreenplayAnalysis``(全本剧本)。
 LLM 单次调用产出一集的分镜清单(``StoryboardList``),由 workflow 包装成 ``Episode``,
 最后所有 ``Episode`` 组合成 ``ScreenplayAnalysis``。
+
+**schema description 写作原则**(给后续维护者):
+
+* description 只讲"字段是什么 / 怎么填 / 一个微例",**不讲决策规则**——
+  决策规则的权威源是 ``logic.py:SYSTEM_PROMPT``,在 description 里复述会让
+  LLM 注意力分散、以后改一处忘改另一处。
+* 不用 markdown(``**bold**`` / ``- bullets``),纯文本中文模型友好。
+* 字段类型已用 ``Literal`` 约束的(如 ``ShotType``)就不再列举枚举值。
 """
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 
 
-class Storyboard(BaseModel):
-    """单个分镜(对应一个具体镜头)。LLM 直接按这个 schema 产出。"""
+ShotType = Literal["远景", "全景", "中景", "近景", "特写", "大特写"]
 
-    index: int = Field(..., description="在该集中的序号(1-based)")
-    shot_type: str = Field(
-        default="",
-        description="镜头类型:远景 / 全景 / 中景 / 近景 / 特写 / 大特写",
+
+class Storyboard(BaseModel):
+    """单个分镜:一个具体镜头(3-15 秒)。"""
+
+    index: int = Field(..., description="在本集中的序号,1-based,从 1 开始连续编号。")
+    shot_type: ShotType = Field(
+        ...,
+        description="镜头类型,从枚举里 6 选 1。",
     )
     description: str = Field(
         default="",
-        description="画面描述。直接给图像生成模型当 prompt 用,要写明谁在做什么 + 光线 + 构图。",
+        description=(
+            "画面描述,直接给图像生成模型当 prompt。"
+            "格式:谁在做什么 + 环境 + 光线 + 构图视角。出场人物用正式 name(不用别名)。"
+        ),
     )
     characters: List[str] = Field(
         default_factory=list,
-        description="出场人物的正式 name(对应 CharacterRoster)",
+        description="本镜画面里可辨认的出场人物 name(取自人物档案的正式 name)。",
     )
     setting: str = Field(
         default="",
-        description="本镜场景:引用 Setting.name(单一地点)",
+        description=(
+            "本镜场景 name,单一地点,必须取自 Beat.setting_refs 里某一个。"
+        ),
     )
     dialogue: str = Field(
         default="",
         description=(
-            "本镜内的**开口说话**原文(纯净 TTS):角色对白、群众议论、测验员/执事播报等。"
-            "不要把小说第三人称叙述放在这里。"
-            "长台词跨多镜时,每镜只放对应该画面的那一段。"
+            "本镜内开口说话的原文(纯净 TTS 用):对白 / 群众议论 / 测验员播报等。"
+            "照抄原文台词,本镜没人说话留空。"
         ),
     )
     voiceover: str = Field(
         default="",
         description=(
-            "本镜内的**第三人称旁白**原文(纯净 TTS),默认可留空。"
-            "仅当画面难以单独传达、且不是任何人「说出声」的对白时使用;"
-            "若 description 已交代同义信息则必须留空。"
-            "长旁白跨多镜时按画面切点切片,每镜最多一句、宜 ≤35 字。"
+            "本镜的第三人称旁白(纯净 TTS 用),默认留空。"
+            "仅当画面单独难以传达必要信息时,从原文浓缩为一句(≤35 字)。"
         ),
     )
     duration_sec: float = Field(
         default=0.0,
-        description=(
-            "本镜画面 hold 时长(秒),建议 3-15。"
-            "= max(画面节奏需求, 念完 dialogue + voiceover 所需时间)。"
-            "估算口径:对白 ~3.5 字/秒,旁白 ~3 字/秒。"
-        ),
+        description="本镜画面 hold 时长(秒,3-15,平均 6-8)。",
     )
 
 
@@ -80,10 +89,9 @@ class ScreenplayAnalysis(BaseModel):
 
 
 class StoryboardList(BaseModel):
-    """LLM 单段 Beat 的输出:本集的分镜清单。
+    """本集所有分镜的有序清单。
 
-    薄包装 —— ``chat_json`` 要求 schema 是 ``BaseModel`` 子类,LLM 实际产
-    ``storyboards`` 列表,外面再包成 ``Episode``。
+    每集 ~15-30 个镜头,所有镜头 ``duration_sec`` 之和 ≈ 目标集时长。
     """
 
     storyboards: List[Storyboard] = Field(default_factory=list)
@@ -92,6 +100,7 @@ class StoryboardList(BaseModel):
 __all__ = [
     "Episode",
     "ScreenplayAnalysis",
+    "ShotType",
     "Storyboard",
     "StoryboardList",
 ]

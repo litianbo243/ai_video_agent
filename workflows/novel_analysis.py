@@ -1,4 +1,4 @@
-"""novel_analysis 父-workflow:组合 4 个子-workflow,产出最终剧本结构。
+"""novel_analysis 父-workflow:组合 3 个子-workflow,产出最终剧本结构。
 
 公开 API:
 
@@ -6,7 +6,7 @@
     顶层,runner 用。派生带时间戳的输出目录 + 建 LLM + 编译并执行父-graph,
     把最终 ``FinalReport`` / 输出路径打包返回。
 * ``build_graph(llm)``
-    编译父-workflow(含 4 个子-workflow 的内嵌 compiled graph)。
+    编译父-workflow(含 3 个子-workflow 的内嵌 compiled graph)。
 * ``WorkflowState``
     节点之间流通的状态契约(``TypedDict``)。
 * ``RunResult``
@@ -21,31 +21,30 @@ DAG::
         │                                    │
         └──[txt]─────────────────────────────┴──▶ ingest_and_batch
                                                        │
-                              ┌────── fan-out ─────────┴──────┐
-                              ▼                                ▼
-                      character_analysis              setting_analysis
-                              └────────── fan-in ─────────────┘
-                                              ▼
-                                        beat_analysis
-                                              ▼
-                                      storyboard_analysis
-                                              ▼
-                                            write
-                                              ▼
-                                            END
+                                                       ▼
+                                              character_analysis
+                                                       ▼
+                                              beat_analysis
+                                                       ▼
+                                              storyboard_analysis
+                                                       ▼
+                                                     write
+                                                       ▼
+                                                      END
 
 每个 ``*_analysis`` 节点的实现都是 **invoke 对应子-workflow 的 compiled graph**,
 而不是直接调内部函数。这样:
 
-* 5 个 workflow(character / setting / beat / storyboard / 本父-workflow)形态完全一致;
+* 4 个 workflow(character / beat / storyboard / 本父-workflow)形态完全一致;
 * 子-workflow 独立跑时由 ``runner → manager.run(config)`` 触发,
   父-workflow 调用时则注入 ``ingest_result`` 跳过 ingest 节点(由各子 workflow 的
   ``set_conditional_entry_point`` 自动路由);
 * 后续给 novel_analysis 加缓存(读上次的 characters.json 跳过 character 子-workflow)
   只需要在这一层加 cache 检查节点,子-workflow 不动。
 
-``character_analysis`` 和 ``setting_analysis`` 没有相互依赖,LangGraph 会**并发执行**
-(墙钟时间近乎砍半;LLM 调用费不变)。
+**场景的处理:** 本工程不维护独立的场景视觉档案。Beat agent 自己产出
+``setting_refs`` 作为字符串 label,storyboard agent 在写每镜 ``description`` 时
+用原文 + LLM 常识把视觉环境写到画面里。所以这里没有 setting_analysis 子-workflow。
 """
 
 from __future__ import annotations
@@ -63,13 +62,11 @@ from skills.book_ingest import IngestResult, load_and_batch_txt
 from skills.epub_to_txt import epub_to_txt
 from agents.extract_beats import BeatList
 from agents.extract_characters import CharacterRoster
-from agents.extract_settings import SettingCollection
 from agents.extract_storyboard import ScreenplayAnalysis
 from skills.file_io import FinalReport, ReportMeta, write_final_report
 from workflows import (
     beat_analysis,
     character_analysis,
-    setting_analysis,
     storyboard_analysis,
 )
 
@@ -93,6 +90,7 @@ class WorkflowState(TypedDict, total=False):
     max_batch_chars: int
     max_total_chars: int
     target_episode_duration_sec: int
+    recent_beats_window: int
     llm_base_url: str
     llm_model: str
 
@@ -102,9 +100,8 @@ class WorkflowState(TypedDict, total=False):
     # --- ingest_and_batch 之后(替代旧的 title / raw_chars / total_chars / batches 四件套) ---
     ingest_result: IngestResult
 
-    # --- 各子-workflow 输出(可并行写,key 互不冲突)---
+    # --- 各子-workflow 输出 ---
     characters: CharacterRoster
-    settings: SettingCollection
     beats: BeatList
     screenplay: ScreenplayAnalysis
 
@@ -171,18 +168,12 @@ def _node_character_analysis(state: WorkflowState, sub_graph: Any) -> WorkflowSt
     return {"characters": final["roster"]}
 
 
-def _node_setting_analysis(state: WorkflowState, sub_graph: Any) -> WorkflowState:
-    final: setting_analysis.State = sub_graph.invoke(
-        {"ingest_result": state["ingest_result"]}
-    )
-    return {"settings": final["collection"]}
-
-
 def _node_beat_analysis(state: WorkflowState, sub_graph: Any) -> WorkflowState:
     final: beat_analysis.State = sub_graph.invoke({
         "ingest_result": state["ingest_result"],
         "characters": state["characters"],
-        "settings": state["settings"],
+        "target_duration_sec": state["target_episode_duration_sec"],
+        "context_window": state["recent_beats_window"],
     })
     return {"beats": final["beats"]}
 
@@ -192,8 +183,8 @@ def _node_storyboard_analysis(state: WorkflowState, sub_graph: Any) -> WorkflowS
         "ingest_result": state["ingest_result"],
         "beats": state["beats"],
         "characters": state["characters"],
-        "settings": state["settings"],
         "target_duration_sec": state["target_episode_duration_sec"],
+        "context_window": state["recent_beats_window"],
     })
     return {"screenplay": final["screenplay"]}
 
@@ -214,7 +205,6 @@ def _node_write(state: WorkflowState) -> WorkflowState:
     report = FinalReport(
         screenplay=state["screenplay"],
         characters=state["characters"],
-        settings=state["settings"],
         beats=state["beats"],
         meta=meta,
     )
@@ -237,12 +227,10 @@ def _node_write(state: WorkflowState) -> WorkflowState:
 
 
 def build_graph(llm: LLMClient):
-    """编译父 workflow。4 个子-workflow 的 compiled graph 在这里一次性建好,闭包注入节点。"""
+    """编译父 workflow。3 个子-workflow 的 compiled graph 在这里一次性建好,闭包注入节点。"""
     from langgraph.graph import StateGraph, END
 
-    # 子-workflow 各编译一次(节点 lambda 通过闭包持有,避免每次 invoke 重新编译)
     char_graph = character_analysis.build_graph(llm)
-    setting_graph = setting_analysis.build_graph(llm)
     beat_graph = beat_analysis.build_graph(llm)
     storyboard_graph = storyboard_analysis.build_graph(llm)
 
@@ -253,8 +241,6 @@ def build_graph(llm: LLMClient):
     graph.add_node("ingest_and_batch", _node_ingest_and_batch)
     graph.add_node("character_analysis",
                    lambda s: _node_character_analysis(s, char_graph))
-    graph.add_node("setting_analysis",
-                   lambda s: _node_setting_analysis(s, setting_graph))
     graph.add_node("beat_analysis",
                    lambda s: _node_beat_analysis(s, beat_graph))
     graph.add_node("storyboard_analysis",
@@ -270,14 +256,8 @@ def build_graph(llm: LLMClient):
     )
     graph.add_edge("convert_epub", "ingest_and_batch")
 
-    # fan-out:char + setting 并行(两条独立的边)
     graph.add_edge("ingest_and_batch", "character_analysis")
-    graph.add_edge("ingest_and_batch", "setting_analysis")
-
-    # fan-in:beat 等两边都完成
     graph.add_edge("character_analysis", "beat_analysis")
-    graph.add_edge("setting_analysis", "beat_analysis")
-
     graph.add_edge("beat_analysis", "storyboard_analysis")
     graph.add_edge("storyboard_analysis", "write")
     graph.add_edge("write", END)
@@ -305,11 +285,14 @@ def run(config: RunConfig) -> RunResult:
     logger.info("本次运行输出目录:%s", out_root)
 
     llm = get_client(config.llm)
+    if config.llm.trace_file is None:
+        llm.set_trace_file(str(out_root / "llm_trace.jsonl"))
     logger.info(
         "novel_analysis workflow 启动:input=%s output=%s max_batch_chars=%d "
-        "max_total_chars=%d episode=%ds llm=%s @ %s",
+        "max_total_chars=%d episode=%ds window=%d recursion=%d llm=%s @ %s",
         config.input, out_root, config.max_batch_chars, config.max_total_chars,
-        config.target_episode_duration_sec, llm.model, llm.base_url,
+        config.target_episode_duration_sec, config.recent_beats_window,
+        config.langgraph_recursion_limit, llm.model, llm.base_url,
     )
 
     graph = build_graph(llm)
@@ -319,12 +302,16 @@ def run(config: RunConfig) -> RunResult:
         "max_batch_chars": config.max_batch_chars,
         "max_total_chars": config.max_total_chars,
         "target_episode_duration_sec": config.target_episode_duration_sec,
+        "recent_beats_window": config.recent_beats_window,
         "llm_base_url": llm.base_url,
         "llm_model": llm.model,
     }
 
     t_start = time.perf_counter()
-    final: WorkflowState = graph.invoke(initial, config={"recursion_limit": 50})
+    final: WorkflowState = graph.invoke(
+        initial,
+        config={"recursion_limit": config.langgraph_recursion_limit},
+    )
     elapsed = time.perf_counter() - t_start
     logger.info(
         "novel_analysis workflow 完成,总用时 %.1f 秒(%.1f 分钟)",
