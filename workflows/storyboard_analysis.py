@@ -24,10 +24,13 @@ storyboard 这一层不重复写 char 节点,那是 beat 的职责。
 
 * ``run(config) -> (IngestResult, CharacterRoster, BeatList, ScreenplayAnalysis)``
     顶层。
-* ``run_with_batches(beats, characters, batches, llm, *, target_duration_sec=180, title="") -> ScreenplayAnalysis``
+* ``run_with_batches(beats, characters, batches, *, target_duration_sec=180, title="") -> ScreenplayAnalysis``
     纯计算循环(逐 Beat 跑一次 LLM,产单集 Episode,组装成 ScreenplayAnalysis)。
-* ``build_graph(llm)`` / ``State``
+* ``build_graph()`` / ``State``
     LangGraph 编译 + 状态契约。
+
+LLM 由各 agent 自治(``agents/extract_storyboard/llm.json`` 及上游 agents 同理),
+workflow 不再 build / 传递 LLM。
 """
 
 from __future__ import annotations
@@ -37,7 +40,6 @@ import time
 from typing import Any, Dict, Iterable, List, Tuple, TypedDict
 
 from configs import RunConfig
-from llm.client import LLMClient, get_client
 from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, ingest_book
 from agents.extract_beats import BeatList
@@ -82,7 +84,6 @@ def run_with_batches(
     beats: BeatList,
     characters: CharacterRoster,
     batches: Iterable[Batch],
-    llm: LLMClient,
     *,
     target_duration_sec: int = 180,
     title: str = "",
@@ -108,7 +109,7 @@ def run_with_batches(
         )
         t0 = time.perf_counter()
         ep = storyboard_beat(
-            beat, char_lookup, batch_lookup, llm,
+            beat, char_lookup, batch_lookup,
             target_duration_sec=target_duration_sec,
         )
         elapsed = time.perf_counter() - t0
@@ -169,10 +170,10 @@ def _node_beat_analysis(state: State, sub_graph: Any) -> State:
     }
 
 
-def _node_analyze(state: State, llm: LLMClient) -> State:
+def _node_analyze(state: State) -> State:
     ing = state["ingest_result"]
     screenplay = run_with_batches(
-        state["beats"], state["characters"], ing.batches, llm,
+        state["beats"], state["characters"], ing.batches,
         target_duration_sec=state.get("target_duration_sec", 180),
         title=ing.title,
     )
@@ -184,16 +185,18 @@ def _node_analyze(state: State, llm: LLMClient) -> State:
 # ---------------------------------------------------------------------------
 
 
-def build_graph(llm: LLMClient):
-    """编译 storyboard_analysis workflow,内嵌 beat 子-graph(beat 又内嵌 character)。"""
+def build_graph():
+    """编译 storyboard_analysis workflow,内嵌 beat 子-graph(beat 又内嵌 character)。
+
+    LLM 由各 agent 自治,workflow 不再注入。"""
     from langgraph.graph import StateGraph, END
 
-    beat_graph = beat_analysis.build_graph(llm)
+    beat_graph = beat_analysis.build_graph()
 
     g = StateGraph(State)
     g.add_node("ingest", _node_ingest)
     g.add_node("beat_analysis", lambda s: _node_beat_analysis(s, beat_graph))
-    g.add_node("analyze", lambda s: _node_analyze(s, llm))
+    g.add_node("analyze", _node_analyze)
 
     g.set_entry_point("ingest")
     g.add_edge("ingest", "beat_analysis")
@@ -206,8 +209,7 @@ def run(
     config: RunConfig,
 ) -> Tuple[IngestResult, CharacterRoster, BeatList, ScreenplayAnalysis]:
     """从 ``RunConfig`` 出发跑完整 storyboard workflow,顺带把 character + beat 也跑出来。"""
-    llm = get_client(config.llm)
-    graph = build_graph(llm)
+    graph = build_graph()
     final: State = graph.invoke({
         "config": config,
         "target_duration_sec": config.target_episode_duration_sec,

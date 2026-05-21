@@ -3,13 +3,15 @@
 公开 API:
 
 * ``run(config) -> (IngestResult, CharacterRoster)``
-    顶层,runner 用。建 LLM → 编译并执行 graph(自带 ingest 节点)。
+    顶层,runner 用。编译并执行 graph(自带 ingest 节点)。
+    LLM 由 character agent 自治(``agents/extract_characters/llm.json``),
+    workflow 不再 build / 传递 LLM。
 
-* ``run_with_batches(batches, llm, *, title="") -> CharacterRoster``
+* ``run_with_batches(batches, *, title="") -> CharacterRoster``
     纯计算批循环(config-free)。workflow 的 analyze 节点直接调它,也可在
     notebook / 测试里手工备好 batches 直接调,不走 LangGraph。
 
-* ``build_graph(llm)``
+* ``build_graph()``
     编译子-workflow,父-workflow 用 ``sub_graph.invoke(...)`` 调用。
 
 * ``State``
@@ -28,12 +30,10 @@ import time
 from typing import Dict, Iterable, Tuple, TypedDict
 
 from configs import RunConfig
-from llm.client import LLMClient, get_client
 from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, ingest_book
 from agents.extract_characters import (
     Character,
-    CharacterExtraction,
     CharacterRoster,
     extract_for_batch,
 )
@@ -61,38 +61,13 @@ class State(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# 纯计算:批循环(analyze 节点 + 外部直接调用 共用)
+# 编排:批循环(analyze 节点 + 外部直接调用 共用)
+# 抽取与合并的具体逻辑都在 agents.extract_characters 内。
 # ---------------------------------------------------------------------------
-
-
-def _merge(known: Dict[str, Character], delta: CharacterExtraction) -> None:
-    """同名 → 融合;新名 → 新增并赋全局 index。
-
-    aliases 取并集;appearance / personality 非空才覆盖。
-    新人物若三大字段全空(LLM 凑出来的空壳),跳过不建档 + warn。
-    """
-    for draft in delta.new_or_updated_characters:
-        existing = known.get(draft.name)
-        if existing is None:
-            if not draft.appearance and not draft.personality and not draft.aliases:
-                logger.warning(
-                    "[character_analysis] 跳过空壳新人物 name=%r(无外貌/性格/别名)",
-                    draft.name,
-                )
-                continue
-            ch = Character(**draft.model_dump(), index=len(known) + 1)
-            known[draft.name] = ch
-            continue
-        existing.aliases = sorted(set(existing.aliases) | set(draft.aliases))
-        if draft.appearance:
-            existing.appearance = draft.appearance
-        if draft.personality:
-            existing.personality = draft.personality
 
 
 def run_with_batches(
     batches: Iterable[Batch],
-    llm: LLMClient,
     *,
     title: str = "",
 ) -> CharacterRoster:
@@ -107,8 +82,7 @@ def run_with_batches(
     t_total = time.perf_counter()
     for i, batch in enumerate(batches, start=1):
         t0 = time.perf_counter()
-        delta = extract_for_batch(batch, known, llm, title=title)
-        _merge(known, delta)
+        extract_for_batch(batch, known, title=title)
         elapsed = time.perf_counter() - t0
         logger.info(
             "[character_analysis] %d/%d (batch=%d) 完成,用时 %.1f 秒。累计 %d 人",
@@ -148,9 +122,9 @@ def _node_ingest(state: State) -> State:
     return {"ingest_result": ing}
 
 
-def _node_analyze(state: State, llm: LLMClient) -> State:
+def _node_analyze(state: State) -> State:
     ing = state["ingest_result"]
-    roster = run_with_batches(ing.batches, llm, title=ing.title)
+    roster = run_with_batches(ing.batches, title=ing.title)
     return {"roster": roster}
 
 
@@ -159,13 +133,13 @@ def _node_analyze(state: State, llm: LLMClient) -> State:
 # ---------------------------------------------------------------------------
 
 
-def build_graph(llm: LLMClient):
-    """编译 character_analysis workflow。``llm`` 通过闭包注入 analyze 节点。"""
+def build_graph():
+    """编译 character_analysis workflow。LLM 由 character agent 自治,workflow 无需注入。"""
     from langgraph.graph import StateGraph, END
 
     g = StateGraph(State)
     g.add_node("ingest", _node_ingest)
-    g.add_node("analyze", lambda s: _node_analyze(s, llm))
+    g.add_node("analyze", _node_analyze)
     g.set_conditional_entry_point(
         _route_entry,
         {"needs_ingest": "ingest", "skip_ingest": "analyze"},
@@ -177,8 +151,7 @@ def build_graph(llm: LLMClient):
 
 def run(config: RunConfig) -> Tuple[IngestResult, CharacterRoster]:
     """从 ``RunConfig`` 出发跑完整 character workflow。"""
-    llm = get_client(config.llm)
-    graph = build_graph(llm)
+    graph = build_graph()
     final: State = graph.invoke({"config": config})
     if "ingest_result" not in final or "roster" not in final:
         raise RuntimeError("character_analysis workflow 结束但 ingest_result / roster 缺失")

@@ -1,0 +1,11 @@
+{
+  "input": "inputs/淫荡少妇白洁系列v1.1.epub",
+  "output_dir": "outputs",
+
+  "max_batch_chars": 20000,
+  "max_total_chars": 200000,
+
+  "target_episode_duration_sec": 300,
+  "recent_beats_window": 8,
+  "langgraph_recursion_limit": 50
+}

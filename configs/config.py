@@ -9,21 +9,18 @@ JSON 文件长这样::
       "max_total_chars": 0,
       "target_episode_duration_sec": 180,
       "recent_beats_window": 10,
-      "langgraph_recursion_limit": 50,
-      "llm": {
-        "base_url": "https://api.siliconflow.cn/v1",
-        "model": "Pro/deepseek-ai/DeepSeek-V3.2",
-        "api_key_env": "SILICONFLOW_API_KEY",
-        "temperature": 0.2,
-        "native_model": false,
-        "json_max_retries": 1
-      }
+      "langgraph_recursion_limit": 50
     }
 
-* ``RunConfig`` —— 整个 JSON 文件的根
-* ``LLMConfig`` —— 其中 ``llm`` 子段
+* ``RunConfig`` —— 整个 JSON 文件的根(纯流水线编排参数,不含 LLM 配置)
+* ``LLMConfig`` —— 单个 agent 的 LLM 配置;每个 agent 在自己目录的
+  ``llm.json`` 里独立定义,详见 ``agents/extract_*/llm.json``
 
 API key 不写进 JSON,走 ``.env`` / 环境变量(由 ``api_key_env`` 字段指定变量名)。
+
+历史变化:``RunConfig.llm`` 字段已下放到各 agent —— 不同 agent 可以选不同的
+模型 / endpoint(character agent 用强推理模型,storyboard agent 用便宜模型,
+等等),workflow 不再统一 build LLM。
 """
 
 from __future__ import annotations
@@ -137,7 +134,7 @@ class LLMConfig(BaseModel):
 
 
 class RunConfig(BaseModel):
-    """单次 run 的完整配置。"""
+    """单次 run 的完整配置(只含流水线编排参数,不含 LLM —— 后者归各 agent 自治)。"""
 
     input: str = Field(
         ...,
@@ -189,7 +186,6 @@ class RunConfig(BaseModel):
             "若以后加 cache / 重试节点跑挂了可调高。"
         ),
     )
-    llm: LLMConfig = Field(..., description="LLM 调用配置")
 
 
 __all__ = ["RunConfig", "LLMConfig"]

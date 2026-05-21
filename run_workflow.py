@@ -36,11 +36,20 @@ def _setup_logging() -> None:
 
 
 def _ts_outdir(config: RunConfig) -> Path:
+    """派生带时间戳的 out_dir,顺便给所有 agent 注入 trace 目录。"""
     out_dir = (Path(config.output_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    if config.llm.trace_file is None:
-        config.llm.trace_file = str(out_dir / "llm_trace.jsonl")
+    novel_analysis.setup_agent_traces(out_dir)
     return out_dir
+
+
+def _format_agent_llms() -> str:
+    """渲染各 agent 当前用到的 LLM,作为输出摘要的一行(惰性查询,不副作用 build)。
+
+    流水线跑完后调用——3 个 agent 都已 build 过 LLM,这步只是读 client.model / base_url。
+    """
+    info = novel_analysis.collect_agent_llm_info()
+    return " | ".join(f"{name}={i.model}@{i.base_url}" for name, i in info.items())
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +76,7 @@ def run_character_analysis(config_path: Path) -> None:
     print(f"  书名:   {ing.title or '(无)'}")
     print(f"  字数:   {ing.total_chars}(原文 {ing.raw_chars})")
     print(f"  批次数: {len(ing.batches)}")
-    print(f"  LLM:    {config.llm.model} @ {config.llm.base_url}")
+    print(f"  LLM:    {_format_agent_llms()}")
     print(f"  人物表: {len(roster.characters)} 位")
     print(f"产物文件: {out_path}")
     print("=" * 60)
@@ -99,7 +108,7 @@ def run_beat_analysis(config_path: Path) -> None:
     print(f"  书名:    {ing.title or '(无)'}")
     print(f"  字数:    {ing.total_chars}(原文 {ing.raw_chars})")
     print(f"  批次数:  {len(ing.batches)}")
-    print(f"  LLM:     {config.llm.model} @ {config.llm.base_url}")
+    print(f"  LLM:     {_format_agent_llms()}")
     print(f"  人物表:   {len(roster.characters)} 位")
     print(f"  剧情段:   {len(beats.beats)} 段")
     print(f"  场景 name: {len(setting_names)} 处")
@@ -140,7 +149,7 @@ def run_storyboard_analysis(config_path: Path) -> None:
     print(f"  书名:    {ing.title or '(无)'}")
     print(f"  字数:    {ing.total_chars}(原文 {ing.raw_chars})")
     print(f"  批次数:  {len(ing.batches)}")
-    print(f"  LLM:     {config.llm.model} @ {config.llm.base_url}")
+    print(f"  LLM:     {_format_agent_llms()}")
     print(f"  人物表:   {len(roster.characters)} 位")
     print(f"  剧情段:   {len(beats.beats)} 段")
     print(f"  场景 name: {len(setting_names)} 处")
@@ -167,7 +176,10 @@ def run_novel_analysis(config_path: Path) -> None:
     print(f"  书名:    {report.meta.title or '(无)'}")
     print(f"  字数:    {report.meta.total_chars}")
     print(f"  批次数:  {report.meta.batch_count}")
-    print(f"  LLM:     {report.meta.llm_model} @ {report.meta.llm_base_url}")
+    if report.meta.llm_per_agent:
+        print("  LLM(各 agent):")
+        for name, info in report.meta.llm_per_agent.items():
+            print(f"    - {name}: {info.model} @ {info.base_url}")
     print(f"  人物表:   {len(report.characters.characters)} 位")
     print(f"  剧情段:   {len(report.beats.beats)} 段")
     print(f"  场景 name: {len(setting_names)} 处")
@@ -187,9 +199,10 @@ def run_novel_analysis(config_path: Path) -> None:
 
 if __name__ == "__main__":
     # config_path = Path("configs/novel_analysis.json")
-    config_path = Path("configs/small_llm_test.json")
+    # config_path = Path("configs/small_llm_test.json")
+    config_path = Path("configs/grok_config.json")
 
     # run_novel_analysis(config_path)
-    # run_character_analysis(config_path)
-    run_beat_analysis(config_path)
+    run_character_analysis(config_path)
+    # run_beat_analysis(config_path)
     # run_storyboard_analysis(config_path)

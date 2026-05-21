@@ -8,9 +8,9 @@
 
 | 层 | 含义 | 位置 |
 |---|---|---|
-| **agent** | 一次 LLM 调用 + prompt + I/O schema。最小"会思考"单元。 | `agents/extract_*/` |
+| **agent** | 一次 LLM 调用 + prompt + I/O schema + 自带 LLM 配置(`llm.json` + `llm.py`)。最小"会思考"单元。 | `agents/extract_*/` |
 | **skill** | 确定性原语,不调 LLM(epub 解码、文本分批、文件 I/O)。 | `skills/<name>/` |
-| **workflow** | 用 LangGraph 把 agent + skill 编排成 DAG(multi-agent)。 | `workflows/<name>.py` |
+| **workflow** | 用 LangGraph 把 agent + skill 编排成 DAG(multi-agent);**不再注入 LLM**——每个 agent 自治。 | `workflows/<name>.py` |
 
 agent 之间不互相 import 运行逻辑;跨 agent 数据流靠 workflow state 传。
 
@@ -42,7 +42,7 @@ agent 之间不互相 import 运行逻辑;跨 agent 数据流靠 workflow state 
 ├── screenplay.json / .md          剧本分析(logline + 分集 episodes + 分镜 storyboards)
 ├── characters.json / .md          人物档案(含详细外貌 + 性格,给 Stage 2 做角色定调图)
 ├── beats.json / .md               剧情大纲段(含节奏 + setting_refs 字符串 label + character_refs)
-└── meta.json                      运行元信息(书名 / 字数 / 批次数 / LLM)
+└── meta.json                      运行元信息(书名 / 字数 / 批次数 / 每个 agent 用的 LLM)
 ```
 
 > **场景的处理:** 本工程不维护独立的场景视觉档案。Beat 内 ``setting_refs`` 是字符串
@@ -57,9 +57,10 @@ agent 之间不互相 import 运行逻辑;跨 agent 数据流靠 workflow state 
 ai_video_agent/
 ├── agents/                        # LLM-backed:每个目录 = 一次 LLM 调用
 │   ├── extract_characters/
-│   │   ├── __init__.py            #   重导公共 API + schema
-│   │   ├── logic.py               #   SYSTEM_PROMPT + chat_json + 后处理
-│   │   └── schema.py              #   I/O 契约(Character / Roster / Extraction)
+│   │   ├── __init__.py            #   重导公共 API(含 get_llm / set_llm / set_trace_dir)
+│   │   ├── logic.py               #   SYSTEM_PROMPT + chat_json + 后处理 + 顶部一行实例化 LLM 3 件套
+│   │   ├── schema.py              #   I/O 契约(Character / Roster / Extraction)
+│   │   └── llm.json               #   本 agent 的 LLMConfig
 │   ├── extract_beats/             # 依赖 character schema;场景 name 由本 agent 产出
 │   └── extract_storyboard/        # 依赖前两个 schema;单 beat → 一集分镜
 ├── skills/                        # 确定性原语,不调 LLM
@@ -74,11 +75,12 @@ ai_video_agent/
 │   ├── storyboard_analysis.py     # 内部跑 beat_analysis,逐 beat 调 storyboard agent
 │   └── novel_analysis.py          # 顶层:全跑一遍,落 FinalReport
 ├── configs/
-│   ├── config.py                  # RunConfig / LLMConfig
-│   ├── novel_analysis.json        # 示例 config
+│   ├── config.py                  # RunConfig(纯流水线参数;LLMConfig 仍在,被各 agent 用)
+│   ├── novel_analysis.json        # 示例 config(不含 llm 段——LLM 在 agent 目录)
 │   └── __init__.py                # load_config(...)
 ├── llm/
-│   └── client.py                  # OpenAI 兼容客户端
+│   ├── client.py                  # OpenAI 兼容客户端
+│   └── agent_llm.py               # make_agent_llm_manager:per-agent get_llm/set_llm/set_trace_dir
 ├── mcp_connectors/                # 预留给未来的外部 MCP 适配
 ├── inputs/                        # 源材料,git ignore
 ├── outputs/                       # 运行产物,git ignore
@@ -100,14 +102,15 @@ cp .env.example .env  # 只用本地推理(ollama 等)时此步可跳过
 ## 运行(config-driven)
 
 ```bash
-# 1. 编辑 configs/novel_analysis.json,填上 input、output_dir、llm 等
-# 2. 跑
+# 1. 编辑 configs/novel_analysis.json,填上 input、output_dir 等流水线参数
+# 2. 编辑 agents/extract_*/llm.json,给每个 agent 选 LLM(可以选不同模型)
+# 3. 跑
 python run_workflow.py
 ```
 
 > 配置文件路径和要跑的 workflow 都在 [`run_workflow.py`](run_workflow.py) 末尾 `__main__` 里写死,改对应那两行即可。默认跑 ``run_novel_analysis``(全流程),注释切换到 ``run_character_analysis`` / ``run_beat_analysis`` / ``run_storyboard_analysis`` 可单独跑子-workflow。
 
-### config 结构
+### Pipeline config 结构(`configs/*.json`)
 
 ```json
 {
@@ -116,34 +119,61 @@ python run_workflow.py
   "max_batch_chars": 8000,
   "max_total_chars": 0,
   "target_episode_duration_sec": 180,
-  "llm": {
-    "base_url": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat",
-    "api_key_env": "DEEPSEEK_API_KEY",
-    "temperature": 0.2
-  }
+  "recent_beats_window": 10,
+  "langgraph_recursion_limit": 50
 }
 ```
 
-`input` + `llm.base_url` + `llm.model` 是必填,其它字段都有默认值。
+`input` 是必填,其它字段都有默认值。**注意**:这里**没有 `llm` 段** —— LLM 配置已下放到各 agent,见下一节。
 
 | 字段 | 含义 |
 |---|---|
 | `max_batch_chars` | 每批送给 LLM 的字符上限(默认 8000)|
 | `max_total_chars` | **整本小说**字数上限,超出从尾部直接截断;`0` = 不截断(默认)。**用作快速试跑只取前 N 万字看效果** |
 | `target_episode_duration_sec` | 期望每集时长(秒),LLM 据此分集 + 分镜;默认 180(3 分钟一集,典型短视频) |
+| `recent_beats_window` | beat agent prompt 里展示的最近段数(默认 10);本地小模型 ctx 紧时调低 |
+| `langgraph_recursion_limit` | LangGraph 递归上限(默认 50)|
 
 Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。
 
-> **API key 不要放在 JSON 里**,走 `.env` / 环境变量。config 通过 `api_key_env` 字段指明读哪个变量。这样 config 可以放心入 git。
+### Per-agent LLM 配置(`agents/extract_*/llm.json`)
 
-### 几种常见 LLM 配置(改 base_url 一行就切家)
+每个 agent **独立挑模型**——character agent 适合用强推理模型(理解人物关系),
+storyboard agent 可以用便宜的对话模型(批量生成分镜),互不耦合。
 
-任何 OpenAI 兼容端点都能跑。`.env` 里挂上对应 key,config 里点名 `api_key_env` 即可,多家可以同时挂着。
+```
+agents/extract_characters/llm.json   ← character agent 用的 LLM
+agents/extract_beats/llm.json        ← beat agent 用的 LLM
+agents/extract_storyboard/llm.json   ← storyboard agent 用的 LLM
+```
+
+每个文件就一份 `LLMConfig`:
+
+```json
+{
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-pro",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "temperature": 0.2,
+  "native_model": false,
+  "json_max_retries": 1
+}
+```
+
+> **API key 不要放在 JSON 里**,走 `.env` / 环境变量,通过 `api_key_env` 字段指明读哪个变量。这样 JSON 可以放心入 git。
+>
+> 三个 agent 可以共用同一个 LLM(默认就是),也可以各点各家——比如 character 用 OpenAI,beat 用 DeepSeek,storyboard 用本地 ollama。
+
+LLM trace 自动按 agent 分文件落到 `<out_dir>/llm_trace/<agent_name>.{jsonl, .dir/}`,
+便于事后定位是哪个 agent 哪一批的调用。
+
+### 几种常见 LLM 配置(写到 `agents/extract_*/llm.json`,改 base_url 一行就切家)
+
+任何 OpenAI 兼容端点都能跑。`.env` 里挂上对应 key,JSON 里点名 `api_key_env` 即可,多家可以同时挂着。
 
 **SiliconFlow**(国内聚合,新户送 ¥14):
 ```json
-"llm": {
+{
   "base_url": "https://api.siliconflow.cn/v1",
   "model": "Pro/deepseek-ai/DeepSeek-V3.2",
   "api_key_env": "SILICONFLOW_API_KEY"
@@ -152,7 +182,7 @@ Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。
 
 **智谱 BigModel**(GLM-4.7-Flash 完全免费):
 ```json
-"llm": {
+{
   "base_url": "https://open.bigmodel.cn/api/paas/v4/",
   "model": "glm-4.7-flash",
   "api_key_env": "ZHIPU_API_KEY"
@@ -161,7 +191,7 @@ Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。
 
 **DeepSeek 官方**:
 ```json
-"llm": {
+{
   "base_url": "https://api.deepseek.com/v1",
   "model": "deepseek-chat",
   "api_key_env": "DEEPSEEK_API_KEY"
@@ -170,7 +200,7 @@ Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。
 
 **OpenAI 官方**:
 ```json
-"llm": {
+{
   "base_url": "https://api.openai.com/v1",
   "model": "gpt-4o-mini",
   "api_key_env": "OPENAI_API_KEY"
@@ -179,7 +209,7 @@ Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。
 
 **阿里通义 DashScope**:
 ```json
-"llm": {
+{
   "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
   "model": "qwen-max",
   "api_key_env": "DASHSCOPE_API_KEY"
@@ -188,7 +218,7 @@ Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。
 
 **本地 ollama**(免 API key,启动 `ollama serve` 即可):
 ```json
-"llm": {
+{
   "base_url": "http://localhost:11434/v1",
   "model": "qwen2.5:14b"
 }
@@ -196,7 +226,7 @@ Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。
 
 **自建网关 / 公司内代理**:
 ```json
-"llm": {
+{
   "base_url": "http://gateway.internal:8080/v1",
   "model": "internal-gpt-4o",
   "api_key_env": "MY_GATEWAY_KEY"
@@ -256,22 +286,25 @@ result = novel_analysis.run(config)  # 落 screenplay.json/.md + characters.json
 
 ```python
 from configs import load_config
-from llm.client import get_client
 from skills.book_ingest import ingest_book
-from agents.extract_characters import extract_for_batch as extract_chars
+from agents.extract_characters import extract_for_batch, set_trace_dir
 
 config = load_config("configs/novel_analysis.json")
-llm = get_client(config.llm)
 ing = ingest_book(config.input,
                   max_batch_chars=config.max_batch_chars,
                   max_total_chars=config.max_total_chars)
 
-# 自己写循环 / 自己合并 delta —— 工作流职责
+# 可选:让 LLM trace 落到指定目录,文件名自动 = extract_characters.jsonl
+set_trace_dir("outputs/notebook_run")
+
+# extract_for_batch 内部 lazy build LLM(用 agents/extract_characters/llm.json),
+# 不需要 caller 显式传;调用即自动合并到 known
 known = {}
 for batch in ing.batches:
-    delta = extract_chars(batch, known, llm, title=ing.title)
-    # ... 合并 delta 到 known ...
+    extract_for_batch(batch, known, title=ing.title)
 ```
+
+测试时想 mock LLM:`from agents.extract_characters import set_llm; set_llm(fake_client)`,完事后 `set_llm(None)` 复位。
 
 ## 新增一个 skill
 
@@ -289,16 +322,31 @@ skills/<name>/
 
 ```
 agents/extract_<X>/
-├── __init__.py     # 重导 logic 的公共函数 + schema 的公共类型
-├── logic.py        # SYSTEM_PROMPT + 单次 chat_json 调用 + 必要后处理
-└── schema.py       # I/O 契约:Draft(LLM 原始输出) / Domain(合并后) / Collection / *Extraction
+├── __init__.py     # 重导 logic 公共函数 + schema 公共类型(含 get_llm/set_llm/set_trace_dir)
+├── logic.py        # SYSTEM_PROMPT + 单次 chat_json 调用 + 后处理;顶部一行实例化 LLM 3 件套
+├── schema.py       # I/O 契约:Draft(LLM 原始输出) / Domain(合并后) / Collection / *Extraction
+└── llm.json        # 本 agent 用的 LLMConfig(base_url + model + api_key_env + …)
+```
+
+`logic.py` 顶部统一这样起 LLM(每个 agent 就改 `agent_name` 这一处):
+
+```python
+from pathlib import Path
+from llm.agent_llm import make_agent_llm_manager
+
+get_llm, set_llm, set_trace_dir = make_agent_llm_manager(
+    agent_name="extract_<X>",
+    config_path=Path(__file__).parent / "llm.json",
+)
 ```
 
 约定:
+- agent 完全**自治** —— 自己的 prompt、自己的 schema、自己的 LLM 配置;workflow 不再给 agent 注入 LLM。
 - agent 只做**一次 LLM 调用**(单批 / 单 beat / 单 prompt)。批次循环、合并累积是 workflow 的职责。
 - agent **不直接 import 别的 agent 的 logic**;但可以 `from agents.extract_Y.schema import ...` 复用类型契约。
 - agent 可以 `from skills.X import ...` 用确定性原语。
-- 把 agent 接到 workflow:在 `workflows/<flow>.py` 里 build 一个 LangGraph 节点,内部循环调 `extract_for_batch`(或 `storyboard_beat`)。
+- LLM 客户端 lazy build + 模块级缓存:首次 `get_llm()` 才读 `llm.json` 建客户端,之后命中缓存。
+- 把 agent 接到 workflow:在 `workflows/<flow>.py` 里 build 一个 LangGraph 节点,内部循环调 `extract_for_batch`(或 `storyboard_beat`),**不传 llm**。
 
 ## Cursor IDE 技能 vs 运行时技能(两个不同的层)
 

@@ -57,13 +57,13 @@ from pathlib import Path
 from typing import Any, Dict, TypedDict
 
 from configs import RunConfig
-from llm.client import LLMClient, get_client
 from skills.book_ingest import IngestResult, load_and_batch_txt
 from skills.epub_to_txt import epub_to_txt
+from agents import extract_beats, extract_characters, extract_storyboard
 from agents.extract_beats import BeatList
 from agents.extract_characters import CharacterRoster
 from agents.extract_storyboard import ScreenplayAnalysis
-from skills.file_io import FinalReport, ReportMeta, write_final_report
+from skills.file_io import AgentLLMInfo, FinalReport, ReportMeta, write_final_report
 from workflows import (
     beat_analysis,
     character_analysis,
@@ -71,6 +71,41 @@ from workflows import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Agent LLM 编排:trace 注入 + 配置摘要采集
+# ---------------------------------------------------------------------------
+
+
+AGENT_LLM_MODULES = {
+    "extract_characters": extract_characters,
+    "extract_beats":      extract_beats,
+    "extract_storyboard": extract_storyboard,
+}
+
+
+def setup_agent_traces(out_dir: Path) -> None:
+    """为所有 agent 注入运行时 trace 目录(``<out_dir>/llm_trace/<agent>.jsonl``)。
+
+    runner 顶层在派生 out_dir 之后调一次即可。各 agent 内部首次 build LLM
+    时会自动 pick up 这个 trace 路径。
+    """
+    for agent in AGENT_LLM_MODULES.values():
+        agent.set_trace_dir(out_dir)
+
+
+def collect_agent_llm_info() -> Dict[str, AgentLLMInfo]:
+    """收集每个 agent 实际用到的 LLM 摘要(base_url + model),供 ReportMeta 落盘。
+
+    会触发 lazy build(若尚未 build);流水线跑到 write 阶段时 3 个 agent 都
+    已用过 LLM,这步只是查询,无副作用。
+    """
+    out: Dict[str, AgentLLMInfo] = {}
+    for name, agent in AGENT_LLM_MODULES.items():
+        client = agent.get_llm()
+        out[name] = AgentLLMInfo(base_url=client.base_url, model=client.model)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +117,8 @@ class WorkflowState(TypedDict, total=False):
     """LangGraph 在节点之间传递的状态对象(``TypedDict``)。
 
     保持薄:子-workflow 内部的迭代/累加状态不放这里,只放跨节点产物。
+    LLM 由各 agent 自治(每个 agent 有自己的 ``llm.json``),所以 state 里
+    不再有 ``llm_base_url`` / ``llm_model``。
     """
 
     # --- 启动时填入 ---
@@ -91,8 +128,6 @@ class WorkflowState(TypedDict, total=False):
     max_total_chars: int
     target_episode_duration_sec: int
     recent_beats_window: int
-    llm_base_url: str
-    llm_model: str
 
     # --- detect_input / convert_epub 之后(ingest 节点会消费) ---
     txt_path: str
@@ -199,8 +234,7 @@ def _node_write(state: WorkflowState) -> WorkflowState:
         batch_count=len(ing.batches),
         max_batch_chars=state["max_batch_chars"],
         max_total_chars=state["max_total_chars"],
-        llm_base_url=state["llm_base_url"],
-        llm_model=state["llm_model"],
+        llm_per_agent=collect_agent_llm_info(),
     )
     report = FinalReport(
         screenplay=state["screenplay"],
@@ -226,13 +260,17 @@ def _node_write(state: WorkflowState) -> WorkflowState:
 # ---------------------------------------------------------------------------
 
 
-def build_graph(llm: LLMClient):
-    """编译父 workflow。3 个子-workflow 的 compiled graph 在这里一次性建好,闭包注入节点。"""
+def build_graph():
+    """编译父 workflow。3 个子-workflow 的 compiled graph 在这里一次性建好,闭包注入节点。
+
+    LLM 由各 agent 自治(``agents/extract_*/llm.json``),workflow 不再 build /
+    传递 LLM。
+    """
     from langgraph.graph import StateGraph, END
 
-    char_graph = character_analysis.build_graph(llm)
-    beat_graph = beat_analysis.build_graph(llm)
-    storyboard_graph = storyboard_analysis.build_graph(llm)
+    char_graph = character_analysis.build_graph()
+    beat_graph = beat_analysis.build_graph()
+    storyboard_graph = storyboard_analysis.build_graph()
 
     graph = StateGraph(WorkflowState)
 
@@ -284,18 +322,16 @@ def run(config: RunConfig) -> RunResult:
     out_root.mkdir(parents=True, exist_ok=True)
     logger.info("本次运行输出目录:%s", out_root)
 
-    llm = get_client(config.llm)
-    if config.llm.trace_file is None:
-        llm.set_trace_file(str(out_root / "llm_trace.jsonl"))
+    setup_agent_traces(out_root)
     logger.info(
         "novel_analysis workflow 启动:input=%s output=%s max_batch_chars=%d "
-        "max_total_chars=%d episode=%ds window=%d recursion=%d llm=%s @ %s",
+        "max_total_chars=%d episode=%ds window=%d recursion=%d",
         config.input, out_root, config.max_batch_chars, config.max_total_chars,
         config.target_episode_duration_sec, config.recent_beats_window,
-        config.langgraph_recursion_limit, llm.model, llm.base_url,
+        config.langgraph_recursion_limit,
     )
 
-    graph = build_graph(llm)
+    graph = build_graph()
     initial: WorkflowState = {
         "input_path": str(config.input),
         "output_dir": str(out_root),
@@ -303,8 +339,6 @@ def run(config: RunConfig) -> RunResult:
         "max_total_chars": config.max_total_chars,
         "target_episode_duration_sec": config.target_episode_duration_sec,
         "recent_beats_window": config.recent_beats_window,
-        "llm_base_url": llm.base_url,
-        "llm_model": llm.model,
     }
 
     t_start = time.perf_counter()
@@ -328,4 +362,11 @@ def run(config: RunConfig) -> RunResult:
     )
 
 
-__all__ = ["WorkflowState", "RunResult", "build_graph", "run"]
+__all__ = [
+    "WorkflowState",
+    "RunResult",
+    "build_graph",
+    "run",
+    "setup_agent_traces",
+    "collect_agent_llm_info",
+]

@@ -3,20 +3,32 @@
 回查 Beat.related_batches 对应原文,把人物档案 + 原文都拼进 prompt。
 **场景视觉环境从原文 + LLM 常识里写到每镜 ``description``**——本工程不维护
 独立的场景视觉档案。``setting`` 字段只是字符串 label,取自 ``Beat.setting_refs``。
+
+LLM 配置在同目录 ``llm.json``,本模块顶部直接 lazy build。
+测试时想 mock:``from agents.extract_storyboard import set_llm; set_llm(fake)``。
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Dict, List
 
-from llm.client import LLMClient
+from llm.agent_llm import make_agent_llm_manager
 from skills.batch_chapters import Batch
 from agents.extract_beats.schema import Beat
 from agents.extract_characters.schema import Character
 from agents.extract_storyboard.schema import Episode, Storyboard, StoryboardList
 
 logger = logging.getLogger(__name__)
+
+
+# Per-agent LLM 管理(配置在同目录 ``llm.json``,首次 ``get_llm()`` 才 build)。
+# 公开三件套:``get_llm`` / ``set_llm``(测试 mock) / ``set_trace_dir``(runner 注入)。
+get_llm, set_llm, set_trace_dir = make_agent_llm_manager(
+    agent_name="extract_storyboard",
+    config_path=Path(__file__).parent / "llm.json",
+)
 
 
 SYSTEM_PROMPT = """\
@@ -66,7 +78,7 @@ voiceover 字段(从原文挑选,但默认少用):
 description 字段(给图像生成模型):
 - 直接写**视觉画面**:谁在做什么 + 环境 + 光线 + 构图视角
 - **环境描述**从原文细节 + Beat.setting_refs 的 name 含义 + LLM 常识里组合
-  (本工程不另存场景视觉档案)。例如 setting_refs=["萧家大厅"],你就要自己
+  (本工程不另存场景视觉档案)。例如 setting_refs=["林家大厅"],你就要自己
   构想中式宅院大厅:朱漆梁柱、上首主位、雕花木椅、香炉等;原文若提到具体器物
   (如"玉石杯"、"袖口云剑纹")要保留进 description
 - 出场人物用**正式 name**(从角色档案里取,不要别名);外貌细节参考人物档案
@@ -135,6 +147,8 @@ def _render_characters_for_prompt(chars: List[Character]) -> str:
             section.append(f"别名: {', '.join(ch.aliases)}")
         if ch.appearance:
             section.append(f"外貌: {ch.appearance}")
+        if ch.background:
+            section.append(f"背景: {ch.background}")
         if ch.personality:
             section.append(f"性格: {ch.personality}")
         parts.append("\n".join(section))
@@ -217,11 +231,15 @@ def storyboard_beat(
     beat: Beat,
     characters: Dict[str, Character],
     batches: Dict[int, Batch],
-    llm: LLMClient,
     *,
     target_duration_sec: int = 180,
 ) -> Episode:
-    """把一段 Beat 展开为一集 Episode(含 storyboards)。"""
+    """把一段 Beat 展开为一集 Episode(含 storyboards)。
+
+    LLM 客户端由 ``agents.extract_storyboard.llm.get_llm()`` lazy 提供,
+    caller 不需要传。
+    """
+    llm = get_llm()
     chars_list, raw_text = _gather_inputs(beat, characters, batches)
 
     system = SYSTEM_PROMPT.format(target_duration=target_duration_sec)

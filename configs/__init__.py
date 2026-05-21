@@ -38,15 +38,7 @@ def load_config(path: str | Path) -> RunConfig:
           f"(beat agent prompt 里展示的最近段数)")
     print(f"  递归上限:       {cfg.langgraph_recursion_limit}"
           f"(LangGraph 父图安全网)")
-    print(f"  模型:           {cfg.llm.model}")
-    print(f"  端点:           {cfg.llm.base_url}")
-    if cfg.llm.api_key_env:
-        print(f"  Key 环境变量:   {cfg.llm.api_key_env}")
-    print(f"  Key 是否就位:   {'是' if cfg.llm.api_key else '否(本地端点可能不需要)'}")
-    print(f"  采样温度:       {cfg.llm.temperature}")
-    print(f"  guided JSON:    {'开' if cfg.llm.native_model else '关'}"
-          f"(本地 vLLM/SGLang/llama.cpp 需要时开)")
-    print(f"  JSON 重试:      {cfg.llm.json_max_retries} 次(校验失败反馈式重试)")
+    print("  LLM:            各 agent 自治,见 agents/extract_*/llm.json")
     print("=" * 60)
 
     return cfg

@@ -73,12 +73,18 @@ def _render_screenplay_md(report: FinalReport) -> str:
     total_cap = (
         f"(全书字数限 {meta.max_total_chars},超出截断)" if meta.max_total_chars else ""
     )
-    parts.append(
+    base_lines = (
         f"- 来源文件: `{meta.source_path}`\n"
         f"- 总字数: {meta.total_chars}{total_cap}\n"
         f"- 批次数: {meta.batch_count}(每批 ≤ {meta.max_batch_chars} 字)\n"
-        f"- LLM: {meta.llm_model} @ {meta.llm_base_url}\n"
     )
+    if meta.llm_per_agent:
+        llm_lines = ["- LLM(各 agent 自选):"]
+        for agent_name, info in meta.llm_per_agent.items():
+            llm_lines.append(f"  - `{agent_name}`: {info.model} @ {info.base_url}")
+        parts.append(base_lines + "\n".join(llm_lines) + "\n")
+    else:
+        parts.append(base_lines)
 
     if sp.episodes:
         parts.append("## 分集与分镜\n")
@@ -161,6 +167,11 @@ def _render_characters_md(roster: CharacterRoster) -> str:
             parts.append("**外貌**")
             parts.append("")
             parts.append(ch.appearance)
+        if ch.background:
+            parts.append("")
+            parts.append("**背景**")
+            parts.append("")
+            parts.append(ch.background)
         if ch.personality:
             parts.append("")
             parts.append("**性格**")

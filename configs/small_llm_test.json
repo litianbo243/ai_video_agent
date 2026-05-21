@@ -7,14 +7,5 @@
 
   "target_episode_duration_sec": 180,
   "recent_beats_window": 5,
-  "langgraph_recursion_limit": 50,
-
-  "llm": {
-    "base_url": "https://api.siliconflow.cn/v1",
-    "model": "Qwen/Qwen3-8B",
-    "api_key_env": "SILICONFLOW_API_KEY",
-    "temperature": 0.2,
-    "native_model": false,
-    "json_max_retries": 2
-  }
+  "langgraph_recursion_limit": 50
 }

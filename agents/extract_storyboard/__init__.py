@@ -6,20 +6,33 @@
 注:"extract" 这个动词其实不太达意——其它三个 agent 是从原文里抽取已存在
 的实体,这里更像是创作。命名按 ``agents/`` 下统一的 ``extract_*`` 前缀走。
 
+LLM 配置 / 客户端是 agent 自治的:配置住在 ``llm.json``,首次调用时按需
+lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
+
 公开 API::
 
     from agents.extract_storyboard import (
         storyboard_beat,
         Storyboard, Episode, ScreenplayAnalysis, StoryboardList,
+        get_llm, set_llm, set_trace_dir,
     )
 
+    set_trace_dir(out_dir)                                 # runner 顶层调一次
     ep: Episode = storyboard_beat(
-        beat, char_dict, setting_dict, batch_dict, llm,
-        target_duration_sec=180,
+        beat, char_dict, batch_dict, target_duration_sec=180,
     )
+
+测试 / notebook 想 mock LLM:``set_llm(fake_client)``,完事后 ``set_llm(None)``
+复位即可。
 """
 
-from agents.extract_storyboard.logic import SYSTEM_PROMPT, storyboard_beat
+from agents.extract_storyboard.logic import (
+    SYSTEM_PROMPT,
+    get_llm,
+    set_llm,
+    set_trace_dir,
+    storyboard_beat,
+)
 from agents.extract_storyboard.schema import (
     Episode,
     ScreenplayAnalysis,
@@ -34,4 +47,7 @@ __all__ = [
     "StoryboardList",
     "SYSTEM_PROMPT",
     "storyboard_beat",
+    "get_llm",
+    "set_llm",
+    "set_trace_dir",
 ]

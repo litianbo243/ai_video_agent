@@ -30,7 +30,7 @@ class BeatDraft(BaseModel):
 
     title: str = Field(
         ...,
-        description="剧情段标题,2-6 字,只描述事件不含地点。例:撕婚约。",
+        description="剧情段标题,2-6 字,只描述事件不含地点。如「会议决裂」「揭穿身世」「夜袭仓库」。",
     )
     summary: str = Field(
         default="",
@@ -40,7 +40,7 @@ class BeatDraft(BaseModel):
         default_factory=list,
         description=(
             "本段涉及的场景 name 列表,按时序。"
-            "已用过的 name 沿用不改字;新地点用「宅院/机构+房间」组合(如「萧家大厅」)。"
+            "已用过的 name 沿用不改字;新地点用「宅院/机构+房间」组合(如「林家大厅」「沈宅书房」「明远集团会议室」)。"
             "纯心理活动留空。"
         ),
     )
@@ -76,7 +76,7 @@ class BeatExtraction(BaseModel):
 
     new_beats: List[BeatDraft] = Field(
         default_factory=list,
-        description="本批中新起的剧情段(0-3 段)。",
+        description="本批中新起的剧情段。数量按内容密度决定,无硬上限;典型每 4-6K 字 1 段。",
     )
     continues_open_beat: bool = Field(
         default=False,
