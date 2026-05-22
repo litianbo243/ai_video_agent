@@ -1,9 +1,11 @@
 """运行时配置目录。
 
-* ``config.py`` —— ``RunConfig`` / ``LLMConfig``,即 ``*.json`` 文件的 Pydantic 契约
-* ``*.json``   —— 实际配置文件,被 ``RunConfig.model_validate_json`` 解析
+* ``run_config.py`` —— ``RunConfig``,即 ``*.json`` 文件的 Pydantic 契约
+* ``*.json``        —— 实际配置文件,被 ``RunConfig.model_validate`` 解析
 
-外部统一用 ``from configs import RunConfig, LLMConfig, load_config``。
+LLM 配置不在这里,见 ``llm.llm_config.LLMConfig``(每个 agent 自治)。
+
+外部统一用 ``from configs import RunConfig, load_config``。
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from configs.config import LLMConfig, RunConfig
+from configs.run_config import RunConfig
 
 
 def load_config(path: str | Path) -> RunConfig:
@@ -40,12 +42,10 @@ def load_config(path: str | Path) -> RunConfig:
           f"(beat agent 每批必须复述/修订的末尾 K 段)")
     print(f"  承接窗口:       {cfg.storyboard_prev_tail_window} 镜"
           f"(storyboard agent 每集开头看上集末 K 镜做画面承接)")
-    print(f"  递归上限:       {cfg.langgraph_recursion_limit}"
-          f"(LangGraph 父图安全网)")
     print("  LLM:            各 agent 自治,见 agents/extract_*/llm.json")
     print("=" * 60)
 
     return cfg
 
 
-__all__ = ["LLMConfig", "RunConfig", "load_config"]
+__all__ = ["RunConfig", "load_config"]

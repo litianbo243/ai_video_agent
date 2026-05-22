@@ -75,7 +75,7 @@ ai_video_agent/
 │   ├── storyboard_analysis.py     # 内部跑 beat_analysis,逐 beat 调 storyboard agent
 │   └── novel_analysis.py          # 顶层:全跑一遍,落 FinalReport
 ├── configs/
-│   ├── config.py                  # RunConfig(纯流水线参数;LLMConfig 仍在,被各 agent 用)
+│   ├── run_config.py              # RunConfig(纯流水线参数;LLMConfig 已下放到 llm/)
 │   ├── novel_analysis.json        # 示例 config(不含 llm 段——LLM 在 agent 目录)
 │   └── __init__.py                # load_config(...)
 ├── llm/
@@ -121,8 +121,7 @@ python run_workflow.py
   "target_episode_duration_sec": 180,
   "recent_beats_window": 10,
   "rewrite_window": 1,
-  "storyboard_prev_tail_window": 3,
-  "langgraph_recursion_limit": 50
+  "storyboard_prev_tail_window": 3
 }
 ```
 
@@ -136,9 +135,9 @@ python run_workflow.py
 | `recent_beats_window` | beat agent prompt 里展示的最近段数(默认 10);本地小模型 ctx 紧时调低 |
 | `rewrite_window` | beat agent 每批必须复述/修订的末尾 K 段(默认 1);K=0 关闭跨批续写(长戏剧段会被批边界切碎),K=1 推荐(LLM 自然接续),K>=2 给 LLM 更大修订空间但 token 成本随 K 增长。同时是 storyboard 的「冷却期」 |
 | `storyboard_prev_tail_window` | storyboard agent 每集开头看上集末 K 镜做画面承接(默认 3);K=0 关闭(集间无视觉承接),K=3 推荐,K>=5 给 LLM 更长视觉记忆但 token 成本随 K 增长 |
-| `langgraph_recursion_limit` | LangGraph 递归上限(默认 50)|
 
-Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。
+Pydantic 模型 `RunConfig` 定义在 [`configs/run_config.py`](configs/run_config.py);
+LLM 客户端配置 `LLMConfig` 定义在 [`llm/llm_config.py`](llm/llm_config.py)(被各 agent 自治使用)。
 
 ### Per-agent LLM 配置(`agents/extract_*/llm.json`)
 

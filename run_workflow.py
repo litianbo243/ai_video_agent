@@ -192,9 +192,7 @@ def run_novel_analysis(config_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    # config_path = Path("configs/novel_analysis.json")
-    # config_path = Path("configs/small_llm_test.json")
-    config_path = Path("configs/grok_config.json")
+    config_path = Path("configs/run_config.json")
 
     # run_novel_analysis(config_path)
     # run_character_analysis(config_path)

@@ -6,6 +6,5 @@
   "max_total_chars": 60000,
 
   "target_episode_duration_sec": 300,
-  "recent_beats_window": 8,
-  "langgraph_recursion_limit": 50
+  "recent_beats_window": 5
 }

@@ -414,11 +414,10 @@ def run(config: RunConfig) -> RunResult:
     setup_agent_traces(out_root)
     logger.info(
         "novel_analysis workflow 启动:input=%s output=%s max_batch_chars=%d "
-        "max_total_chars=%d episode=%ds window=%d rewrite_K=%d prev_tail_K=%d recursion=%d",
+        "max_total_chars=%d episode=%ds window=%d rewrite_K=%d prev_tail_K=%d",
         config.input, out_root, config.max_batch_chars, config.max_total_chars,
         config.target_episode_duration_sec, config.recent_beats_window,
         config.rewrite_window, config.storyboard_prev_tail_window,
-        config.langgraph_recursion_limit,
     )
 
     graph = build_graph()
@@ -434,10 +433,7 @@ def run(config: RunConfig) -> RunResult:
     }
 
     t_start = time.perf_counter()
-    final: WorkflowState = graph.invoke(
-        initial,
-        config={"recursion_limit": config.langgraph_recursion_limit},
-    )
+    final: WorkflowState = graph.invoke(initial)
     elapsed = time.perf_counter() - t_start
     logger.info(
         "novel_analysis workflow 完成,总用时 %.1f 秒(%.1f 分钟)",

@@ -31,7 +31,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-from configs import LLMConfig
+from llm.llm_config import LLMConfig
 from llm.client import LLMClient, get_client
 
 logger = logging.getLogger(__name__)
