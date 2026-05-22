@@ -3,7 +3,7 @@
   "output_dir": "outputs",
 
   "max_batch_chars": 20000,
-  "max_total_chars": 200000,
+  "max_total_chars": 60000,
 
   "target_episode_duration_sec": 300,
   "recent_beats_window": 8,

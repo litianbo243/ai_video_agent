@@ -36,6 +36,10 @@ def load_config(path: str | Path) -> RunConfig:
           f"(beat 切粒度 + storyboard 出镜数都按此对齐)")
     print(f"  近段窗口:       {cfg.recent_beats_window} 段"
           f"(beat agent prompt 里展示的最近段数)")
+    print(f"  续写窗口:       {cfg.rewrite_window} 段"
+          f"(beat agent 每批必须复述/修订的末尾 K 段)")
+    print(f"  承接窗口:       {cfg.storyboard_prev_tail_window} 镜"
+          f"(storyboard agent 每集开头看上集末 K 镜做画面承接)")
     print(f"  递归上限:       {cfg.langgraph_recursion_limit}"
           f"(LangGraph 父图安全网)")
     print("  LLM:            各 agent 自治,见 agents/extract_*/llm.json")

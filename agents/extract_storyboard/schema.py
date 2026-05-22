@@ -24,76 +24,87 @@ ShotType = Literal["远景", "全景", "中景", "近景", "特写", "大特写"
 
 
 class Storyboard(BaseModel):
-    """单个分镜:一个具体镜头(3-15 秒)。"""
+    """单个分镜:一个具体镜头。"""
 
-    index: int = Field(..., description="在本集中的序号,1-based,从 1 开始连续编号。")
-    shot_type: ShotType = Field(
-        ...,
-        description="镜头类型,从枚举里 6 选 1。",
+    index: int = Field(..., description="本镜在本集中的序号,从 1 开始连续编号。")
+    shot_type: ShotType = Field(..., description="镜头类型。")
+    intent: str = Field(
+        default="",
+        description="本镜意图(为什么这么拍 / 让观众感觉什么,精简一句)。",
     )
     description: str = Field(
         default="",
-        description=(
-            "画面描述,直接给图像生成模型当 prompt。"
-            "格式:谁在做什么 + 环境 + 光线 + 构图视角。出场人物用正式 name(不用别名)。"
-        ),
+        description="本镜起始画面 + 整体氛围(给图像生成模型当 prompt,也作视频生成的起点画面)。",
+    )
+    shot_action: str = Field(
+        default="",
+        description="本镜内画面如何变化(动词为主,如「缓缓抬头,泪痕未干,目光转向窗外」);静态镜头留空。",
+    )
+    camera_motion: str = Field(
+        default="",
+        description="本镜运镜方式(推 / 拉 / 摇 / 移 / 升 / 降 / 跟 / 环绕 / 固定);留空 = 固定机位。",
     )
     characters: List[str] = Field(
         default_factory=list,
-        description="本镜画面里可辨认的出场人物 name(取自人物档案的正式 name)。",
+        description="本镜画面里可辨认的出场人物 name 列表。",
     )
     setting: str = Field(
         default="",
-        description=(
-            "本镜场景 name,单一地点,必须取自 Beat.setting_refs 里某一个。"
-        ),
+        description="本镜场景 name(单一地点)。",
+    )
+    speaker: str = Field(
+        default="",
+        description="本镜发声者 name(无人发声时留空)。",
     )
     dialogue: str = Field(
         default="",
-        description=(
-            "本镜内开口说话的原文(纯净 TTS 用):对白 / 群众议论 / 测验员播报等。"
-            "照抄原文台词,本镜没人说话留空。"
-        ),
+        description="本镜的人物台词原文(不含人名前缀)。",
     )
     voiceover: str = Field(
         default="",
-        description=(
-            "本镜的第三人称旁白(纯净 TTS 用),默认留空。"
-            "仅当画面单独难以传达必要信息时,从原文浓缩为一句(≤35 字)。"
-        ),
+        description="本镜的画外旁白 / 人物内心独白(≤35 字)。",
     )
     duration_sec: float = Field(
         default=0.0,
-        description="本镜画面 hold 时长(秒,3-15,平均 6-8)。",
+        description="本镜时长(秒)。",
     )
 
 
 class Episode(BaseModel):
-    """一集(对应一段 Beat)。workflow 把 ``StoryboardList`` 包装成 ``Episode``。"""
+    """一集(1:1 对应一段 Beat,``index`` 与 ``Beat.index`` 相同)。
 
-    index: int = Field(..., description="集序号(1-based,= Beat.index)")
+    workflow 把 ``StoryboardList`` 包装成 ``Episode``,要看本集对应的 Beat 详情
+    用 ``ep.index`` 反查 ``BeatList`` 即可。
+    """
+
+    index: int = Field(..., description="集序号(1-based,= 对应 Beat.index)")
     title: str = Field(default="", description='本集标题,如"第一集 · 废柴觉醒"')
     synopsis: str = Field(default="", description="本集剧情概要(1-2 段)")
-    beat_index: int = Field(default=0, description="对应 Beat.index")
+    director_intent: str = Field(
+        default="",
+        description="本集导演意图(2-4 句):基调 / 重点 / 节奏 / 视觉锤。",
+    )
     storyboards: List[Storyboard] = Field(
         default_factory=list, description="本集所有分镜(按时序)"
     )
 
 
 class ScreenplayAnalysis(BaseModel):
-    """剧本分析:全书 logline + 所有分集(含分镜)。所有 Episode 的聚合。"""
+    """剧本分析:全书所有分集(含分镜)的聚合。
 
-    title: str = Field(default="")
-    logline: str = Field(default="", description="一句话电梯陈述")
+    书名走 ``FinalReport.meta.title``,本类只关心分集内容。
+    """
+
     episodes: List[Episode] = Field(default_factory=list)
 
 
 class StoryboardList(BaseModel):
-    """本集所有分镜的有序清单。
+    """本集所有分镜的有序清单(填法见 system prompt)。"""
 
-    每集 ~15-30 个镜头,所有镜头 ``duration_sec`` 之和 ≈ 目标集时长。
-    """
-
+    director_intent: str = Field(
+        default="",
+        description="本集导演意图(2-4 句):基调 / 重点 / 节奏 / 视觉锤。先填这个,再填 storyboards,让每个镜头都服务于该意图。",
+    )
     storyboards: List[Storyboard] = Field(default_factory=list)
 
 

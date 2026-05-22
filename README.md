@@ -120,6 +120,8 @@ python run_workflow.py
   "max_total_chars": 0,
   "target_episode_duration_sec": 180,
   "recent_beats_window": 10,
+  "rewrite_window": 1,
+  "storyboard_prev_tail_window": 3,
   "langgraph_recursion_limit": 50
 }
 ```
@@ -132,6 +134,8 @@ python run_workflow.py
 | `max_total_chars` | **整本小说**字数上限,超出从尾部直接截断;`0` = 不截断(默认)。**用作快速试跑只取前 N 万字看效果** |
 | `target_episode_duration_sec` | 期望每集时长(秒),LLM 据此分集 + 分镜;默认 180(3 分钟一集,典型短视频) |
 | `recent_beats_window` | beat agent prompt 里展示的最近段数(默认 10);本地小模型 ctx 紧时调低 |
+| `rewrite_window` | beat agent 每批必须复述/修订的末尾 K 段(默认 1);K=0 关闭跨批续写(长戏剧段会被批边界切碎),K=1 推荐(LLM 自然接续),K>=2 给 LLM 更大修订空间但 token 成本随 K 增长。同时是 storyboard 的「冷却期」 |
+| `storyboard_prev_tail_window` | storyboard agent 每集开头看上集末 K 镜做画面承接(默认 3);K=0 关闭(集间无视觉承接),K=3 推荐,K>=5 给 LLM 更长视觉记忆但 token 成本随 K 增长 |
 | `langgraph_recursion_limit` | LangGraph 递归上限(默认 50)|
 
 Pydantic 模型定义在 [`configs/config.py`](configs/config.py)。

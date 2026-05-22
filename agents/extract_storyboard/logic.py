@@ -32,78 +32,105 @@ get_llm, set_llm, set_trace_dir = make_agent_llm_manager(
 
 
 SYSTEM_PROMPT = """\
-你是专业的中文小说视频改编编剧,正在为小说的某一段剧情(一集)改编分镜。
+你是一名优秀的中文短视频分镜导演,负责把小说的一段剧情改编成一集分镜。
 
 输入包括:
 - 一段剧情大纲(Beat:title + summary + setting_refs + character_refs)
-- 关联人物的档案(含外貌 + 性格)—— 用于跨集视觉一致性
-- ★ 这段剧情对应的**原文**(整批章节,几千字)
-  —— 台词 / 旁白 / 视觉描写**都直接从原文里挑选改编**,不要凭空创作
+- 关联人物档案(外貌 + 性格),用于跨集视觉一致性
+- 这段剧情对应的**原文**(整批章节,几千字)
+- 可能给到上下集 beat 摘要 + 上集末尾分镜(用于衔接)
 
 ────────────────────────────────────────────────
-你的任务: 编排本集的分镜清单(storyboards)。
+你的任务: 先定本集**导演意图**,再编排分镜清单(storyboards)。
 
-每集 ~15-30 个镜头,每镜 3-15 秒,平均 6-8 秒;一集所有镜头时长之和 ≈ {target_duration} 秒。
+整集时长合计 ≈ {target_duration} 秒。**短视频节奏**:单镜典型 2-8 秒,
+情绪 / 信息密集的关键镜可到 10 秒,**绝不超 12 秒**。长情绪 / 长对白要
+拆成多镜(换景别 / 切反应镜 / 切局部特写),不要塞到一个长镜里。
 
 ────────────────────────────────────────────────
-【改编规则】
+【先定调,再分镜】
 
-镜头粒度:
-- 优先选择**有戏剧张力的画面**(冲突 / 转折 / 决断 / 情绪爆发)
-- 平稳过渡可以一镜带过
-- 原文里不重要的支线 / 水分内容**直接跳过**(不必逐字改编)
+**集层** — 填 storyboards 之前,先在 director_intent 字段写 2-4 句话定本集导演意图:
+- **基调**:一句话定调(压抑 / 暧昧 / 诡谲 / 凌厉 / 紧张 / 温暖 / 阴郁 / 怀旧 ...)
+- **重点**:本集要让观众**感受到**或**记住**的核心(情绪 / 关系 / 冲突 / 反转点)
+- **节奏**:整集呼吸感(平稳铺陈 / 张力累积 / 短促爆发 / 留白收尾 / 反转 ...)
+- **视觉锤**:1-2 个标志性镜头 / 意象 / 道具(贯穿用,或集末收束)
 
-dialogue 字段(从原文里挑选):
-- 浏览原文,挑出有戏剧张力的**角色对白 / 群众议论 / 测验员或执事式播报**:
-  揭示关系 / 体现冲突 / 决断 / 反转 / 当众宣布结果
-- **照抄原文台词**;太长不适合视频节奏 → 浓缩或在切点拆分
-- 长台词跨多镜时,**不要重复整句**,在标点处把句子拆成多段
-- 普通陈述、寒暄、过渡台词不要选
-- 说话者不在「角色档案」里(路人、测验员等)时,仍把其**开口说的话**放在 dialogue;
-  characters 字段只填本镜画面里可辨认的 roster 人物,没有则留空列表
-- 实在挑不到合适的可自由创作,但要保留人物语气
+**镜层** — 每个 storyboard 在 intent 字段写一句话(≤20 字)说明本镜的具体意图,
+例如:「试探的压迫感」「反应镜,破防」「视觉锤,定调」「节奏喘息」「钩子,暗示反转」。
+intent 决定了本镜的 shot_type / camera_motion / description 怎么选 —
+**先想清楚意图再写画面**,不要把 intent 写成 description 换皮(「白洁哭泣」式描述无效)。
 
-voiceover 字段(从原文挑选,但默认少用):
-- **优先留空字符串 ""** —— 能用镜头 + 表演 + 环境音表现的,就不要念旁白
-- 仅当原文有**第三人称叙事/作者评论/必要信息**且**画面 alone 难以传达**时,
-  才从原文**浓缩为一句**念白(建议 ≤35 字),保留语气
-- **禁止**放入以下内容(这些一律进 dialogue,不是旁白):
-  * 任何人**说出声**的话(含群众嘲讽、窃窃私语式的直接引语)
-  * 测验员 / 执事 / 系统播报式宣读(如「斗之气,X 段」)
-  * 带引号的对白原文
-- **禁止**与 description 同义重复:若 description 已写清动作、情绪、场面,
-  voiceover **必须为空**,不要把小说叙述再念一遍
-- 长旁白跨多镜时按画面切点切片,每镜最多一句
+整集所有 intent 串起来应该能讲出一条情绪曲线,服务于 director_intent 的总纲。
+不要写「就事论事」的客观记录式分镜。
 
-description 字段(给图像生成模型):
-- 直接写**视觉画面**:谁在做什么 + 环境 + 光线 + 构图视角
-- **环境描述**从原文细节 + Beat.setting_refs 的 name 含义 + LLM 常识里组合
-  (本工程不另存场景视觉档案)。例如 setting_refs=["林家大厅"],你就要自己
-  构想中式宅院大厅:朱漆梁柱、上首主位、雕花木椅、香炉等;原文若提到具体器物
-  (如"玉石杯"、"袖口云剑纹")要保留进 description
-- 出场人物用**正式 name**(从角色档案里取,不要别名);外貌细节参考人物档案
-- 不要把 dialogue 文字塞进 description
-- 同一集内对同一 setting 的画面描述要保持视觉一致(色调 / 布局 / 整体氛围)
+────────────────────────────────────────────────
+【改编思路】
 
-setting 字段:
-- **必须 1:1 取自 Beat.setting_refs 列表里的某个 name**(单一地点)
-- 不要自由发挥写新地点,不要把 setting 内容塞进 description 重复
+镜头编排:
+- 用画面讲故事 — 每一镜是一个可被看见的画面
+- 集首 1-2 镜定场(谁、在哪、状态);身份 / 背景 / 关系靠画面 +
+  服装 + 神态 + 环境自然交代,不要靠旁白念身份介绍
+- 原文里水分 / 与本集主线无关的支线可以略过
+- 同一 setting 多镜之间保持视觉一致(色调 / 布局 / 整体氛围)
 
-duration_sec 字段:
+集间衔接(看输入里上下集 beat / 上集末镜):
+- 有上一集 → 集首画面跟上集末镜的空间 / 姿态 / 道具自然延续
+- 有下一集 → 集末留 1 个钩子镜头(画面 / 表情 / 物件)暗示但不剧透
+- 无上一集 → 直接定场亮相;无下一集 → 末镜留一个有余韵的画面收尾
+- 上下集 beat / 上集分镜**只读不抄**,不重演已演过的剧情
+
+────────────────────────────────────────────────
+【各字段填写】
+
+视觉块(description / shot_action / camera_motion):
+
+把「画面静态」「动作演变」「镜头运动」三件事拆开填,**互不重复**。
+
+- description:本镜**起始那一刻**的画面 + 整体氛围 — 谁在做什么 + 环境 + 光线 +
+  构图视角。这字段同时给图像生成模型当 prompt,也给视频生成模型当起点画面
+- shot_action:这一镜**内**画面如何变化(动词为主)。例如「缓缓抬头,泪痕未干,
+  目光转向窗外」「双手攥紧,指节发白」。如果是静态镜头(对话戏 / 表情特写不动 /
+  纯定场)→ **留空**,不要强行编动作
+- camera_motion:运镜方式 — 推 / 拉 / 摇 / 移 / 升 / 降 / 跟 / 环绕 / 固定
+  (留空 = 固定机位)
+
+公共原则:
+- 环境从原文细节 + Beat.setting_refs 的 name 含义 + 常识组合(本工程不另存场景档案)
+- 出场人物用**正式 name**(从角色档案取,不用别名);外貌参考人物档案
+- 不要把 dialogue 文字塞进画面描述
+
+dialogue(本镜人物开口的台词,TTS 用):
+- 原文里人物开口的话(对白 / 群众喊话 / 播报 / 念咒等)优先选取并改编
+- 太长就浓缩或拆到下一镜;同镜多人开口时挑张力最强的一句
+- 只放台词本身,不带「角色名:」前缀
+- 单字感叹(嗯/啊/哎)进 description 写成「轻哼一声」,不进 dialogue
+
+voiceover(角色内心独白,≤35 字):
+- **默认留空**。仅当原文中角色心理活动非常需要靠台词表达出来,才填该角色的内心独白
+- 同镜与 dialogue 互斥(有 dialogue 时 voiceover 留空)
+
+speaker(本镜发声者,TTS 用,可不在 characters 列表):
+- dialogue 说话人 / voiceover 内心独白 → 角色 name(档案内用正式 name,路人用泛称)
+- 双空 → 留空
+
+characters:本镜画面里可辨认的出场人物 name(从角色档案取,不用别名)
+
+setting:**1:1 取自 Beat.setting_refs 里某个 name**(单一地点);不自创新地点
+
+shot_type:6 选 1 — 远景 / 全景 / 中景 / 近景 / 特写 / 大特写
+
+duration_sec(秒):
+- 单镜典型 2-8s,关键情绪镜可到 10s,**绝不超 12s**
 - = max(画面节奏需求, 念完 dialogue + voiceover 所需时间)
-- 估算口径:对白 ~3.5 字/秒,旁白 ~3 字/秒
-- 整集所有镜头时长之和 ≈ {target_duration} 秒
-
-shot_type 字段:6 选 1 — 远景 / 全景 / 中景 / 近景 / 特写 / 大特写
+- 估算:对白 ~3.5 字/秒,旁白 ~3 字/秒
+- 长台词 / 长情绪一定拆多镜,别堆一镜超时
 
 ────────────────────────────────────────────────
-【绝对约束】
-- 不杜撰人物或事件,所有内容必须有原文支撑
-- dialogue / voiceover 必须来自原文(直接搬或浓缩),不要凭空创作
-- 全集约 30%-50% 的镜头 voiceover 应为空;连续多镜不要镜镜念旁白
-- characters 字段必须是输入"角色档案"里出现过的 name
-- setting 字段必须是 Beat.setting_refs 里出现过的 name
-- 一集所有镜头时长加起来要接近 {target_duration} 秒
+【硬约束】
+- characters 必须是角色档案里出现过的 name
+- setting 必须是 Beat.setting_refs 里出现过的 name
+- 一集所有镜头时长之和 ≈ {target_duration} 秒
 - 严格按 JSON Schema 输出
 """
 
@@ -165,13 +192,58 @@ def _render_beat_for_prompt(beat: Beat) -> str:
     ])
 
 
+def _render_timeline(
+    beat: Beat,
+    prev_beat: Beat | None,
+    next_beat: Beat | None,
+) -> str:
+    """渲染上下文剧情时间线:前一集 / 本集 / 下一集。"""
+    lines: List[str] = []
+    if prev_beat is None:
+        lines.append("上一集: (本集为全书开场)")
+    else:
+        lines.append(f"上一集 [{prev_beat.index}]: {prev_beat.title} — {prev_beat.summary}")
+    lines.append(f"本  集 [{beat.index}]: {beat.title} — {beat.summary}   ★ 正在分镜")
+    if next_beat is None:
+        lines.append("下一集: (本集为全书收尾)")
+    else:
+        lines.append(f"下一集 [{next_beat.index}]: {next_beat.title} — {next_beat.summary}")
+    return "\n".join(lines)
+
+
+def _render_prev_tail(storyboards: List[Storyboard]) -> str:
+    """紧凑渲染上集末尾 K 镜,只保留承接相关字段(画面 / 场景 / 台词 / 旁白)。"""
+    if not storyboards:
+        return "(首集,无上集画面)"
+    lines: List[str] = []
+    for sb in storyboards:
+        head = f"- 镜 {sb.index} [{sb.shot_type}]"
+        if sb.setting:
+            head += f" @ {sb.setting}"
+        lines.append(f"{head}: {sb.description}")
+        if sb.dialogue:
+            speaker = sb.speaker or "?"
+            lines.append(f"  台词[{speaker}]: {sb.dialogue}")
+        if sb.voiceover:
+            lines.append(f"  旁白: {sb.voiceover}")
+    return "\n".join(lines)
+
+
 def _build_user_prompt(
     beat: Beat,
     chars: List[Character],
     raw_text: str,
     target_duration: int,
+    *,
+    prev_beat: Beat | None,
+    next_beat: Beat | None,
+    prev_tail_storyboards: List[Storyboard],
 ) -> str:
     return (
+        f"=== 上下文 · 剧情时间线 ===\n"
+        f"{_render_timeline(beat, prev_beat, next_beat)}\n\n"
+        f"=== 上集末尾画面(承接参考,共 {len(prev_tail_storyboards)} 镜)===\n"
+        f"{_render_prev_tail(prev_tail_storyboards)}\n\n"
         f"=== 本段剧情大纲(Beat)===\n{_render_beat_for_prompt(beat)}\n\n"
         f"=== 关联人物档案 ===\n{_render_characters_for_prompt(chars)}\n\n"
         f"=== 本段对应的原文(batch {beat.related_batches})===\n"
@@ -227,28 +299,49 @@ def _sanitize_storyboards(
     return touched
 
 
+DEFAULT_PREV_TAIL_K = 3
+"""默认从上集末尾取多少镜作为本集承接参考。"""
+
+
 def storyboard_beat(
     beat: Beat,
     characters: Dict[str, Character],
     batches: Dict[int, Batch],
     *,
+    prev_beat: Beat | None = None,
+    next_beat: Beat | None = None,
+    prev_tail_storyboards: List[Storyboard] | None = None,
     target_duration_sec: int = 180,
 ) -> Episode:
     """把一段 Beat 展开为一集 Episode(含 storyboards)。
+
+    ``prev_beat`` / ``next_beat``:相邻集 beat summary,LLM 用来做承接 / 钩子决策;
+    全书首集 / 末集时传 ``None``,prompt 会显式标注。
+    ``prev_tail_storyboards``:上集末尾几镜的 Storyboard 列表(典型 K=3),给 LLM
+    看具体画面细节(setting / 姿态 / 服装 / 道具)做承接镜头;首集传 ``None`` / ``[]``。
 
     LLM 客户端由 ``agents.extract_storyboard.llm.get_llm()`` lazy 提供,
     caller 不需要传。
     """
     llm = get_llm()
     chars_list, raw_text = _gather_inputs(beat, characters, batches)
+    prev_tail = prev_tail_storyboards or []
 
     system = SYSTEM_PROMPT.format(target_duration=target_duration_sec)
-    user = _build_user_prompt(beat, chars_list, raw_text, target_duration_sec)
+    user = _build_user_prompt(
+        beat, chars_list, raw_text, target_duration_sec,
+        prev_beat=prev_beat, next_beat=next_beat,
+        prev_tail_storyboards=prev_tail,
+    )
 
     logger.info(
-        "storyboarder 第 %d 段(%s):人物=%d 场景 ref=%d 原文=%d 字",
+        "storyboarder 第 %d 段(%s):人物=%d 场景 ref=%d 原文=%d 字;"
+        "上下文 prev=%s next=%s prev_tail=%d 镜",
         beat.index, beat.title, len(chars_list),
         len(beat.setting_refs), len(raw_text),
+        prev_beat.index if prev_beat else "首集",
+        next_beat.index if next_beat else "末集",
+        len(prev_tail),
     )
 
     sb_pack = llm.chat_json(system, user, StoryboardList)
@@ -270,9 +363,9 @@ def storyboard_beat(
         index=beat.index,
         title=f"第 {beat.index} 集 · {beat.title}",
         synopsis=beat.summary,
-        beat_index=beat.index,
+        director_intent=sb_pack.director_intent,
         storyboards=sb_pack.storyboards,
     )
 
 
-__all__ = ["storyboard_beat", "SYSTEM_PROMPT"]
+__all__ = ["storyboard_beat", "SYSTEM_PROMPT", "DEFAULT_PREV_TAIL_K"]

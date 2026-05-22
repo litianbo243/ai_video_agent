@@ -64,10 +64,8 @@ def _render_screenplay_md(report: FinalReport) -> str:
     sp = report.screenplay
     meta = report.meta
     parts: list = []
-    title = sp.title or meta.title or "(无标题)"
+    title = meta.title or "(无标题)"
     parts.append(f"# 剧本分析 · {title}\n")
-    if sp.logline:
-        parts.append(f"> {sp.logline}\n")
 
     parts.append("## 元信息\n")
     total_cap = (
@@ -107,27 +105,41 @@ def _render_episode_md(ep: Episode) -> list:
     if ep.synopsis:
         out.append("")
         out.append(f"**剧情概要**: {ep.synopsis}")
+    if ep.director_intent:
+        out.append("")
+        out.append(f"**导演意图**: {ep.director_intent}")
     if ep.storyboards:
         out.append("")
-        out.append("| # | 镜头 | 时长 | 出场 | 场景 | 画面 |")
-        out.append("|---|------|------|------|------|------|")
+        out.append("| # | 镜头 | 意图 | 时长 | 出场 | 场景 | 画面 |")
+        out.append("|---|------|------|------|------|------|------|")
         for sb in ep.storyboards:
             chars = ", ".join(sb.characters) if sb.characters else "-"
             setting = sb.setting or "-"
             desc = sb.description.replace("|", "\\|").replace("\n", " ")
             shot = sb.shot_type or "-"
+            intent = (sb.intent or "-").replace("|", "\\|").replace("\n", " ")
             out.append(
-                f"| {sb.index} | {shot} | {sb.duration_sec:.0f}s | {chars} | {setting} | {desc} |"
+                f"| {sb.index} | {shot} | {intent} | {sb.duration_sec:.0f}s | {chars} | {setting} | {desc} |"
             )
+        if any(sb.shot_action or sb.camera_motion for sb in ep.storyboards):
+            out.append("")
+            out.append("**动作 / 运镜**")
+            out.append("")
+            for sb in ep.storyboards:
+                if sb.shot_action:
+                    out.append(f"- 镜{sb.index} 动作: {sb.shot_action}")
+                if sb.camera_motion:
+                    out.append(f"- 镜{sb.index} 运镜: {sb.camera_motion}")
         if any(sb.dialogue or sb.voiceover for sb in ep.storyboards):
             out.append("")
             out.append("**台词 / 旁白**")
             out.append("")
             for sb in ep.storyboards:
+                speaker = sb.speaker or "?"
                 if sb.dialogue:
-                    out.append(f"- 镜{sb.index} 台词: {sb.dialogue}")
+                    out.append(f"- 镜{sb.index} 台词 [{speaker}]: {sb.dialogue}")
                 if sb.voiceover:
-                    out.append(f"- 镜{sb.index} 旁白: {sb.voiceover}")
+                    out.append(f"- 镜{sb.index} 内心 [{speaker}]: {sb.voiceover}")
     out.append("")
     return out
 

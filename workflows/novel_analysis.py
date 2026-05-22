@@ -1,12 +1,12 @@
-"""novel_analysis 父-workflow:组合 3 个子-workflow,产出最终剧本结构。
+"""novel_analysis 父-workflow:**逐 batch 交错**跑三阶段,产出最终剧本结构。
 
 公开 API:
 
 * ``run(config) -> RunResult``
-    顶层,runner 用。派生带时间戳的输出目录 + 建 LLM + 编译并执行父-graph,
-    把最终 ``FinalReport`` / 输出路径打包返回。
-* ``build_graph(llm)``
-    编译父-workflow(含 3 个子-workflow 的内嵌 compiled graph)。
+    顶层,runner 用。派生带时间戳的输出目录 + 注入 agent trace 路径 +
+    编译并执行父-graph,把最终 ``FinalReport`` / 输出路径打包返回。
+* ``build_graph()``
+    编译父-workflow。
 * ``WorkflowState``
     节点之间流通的状态契约(``TypedDict``)。
 * ``RunResult``
@@ -20,29 +20,39 @@ DAG::
     detect_input ──[epub]──▶ convert_epub ──┐
         │                                    │
         └──[txt]─────────────────────────────┴──▶ ingest_and_batch
-                                                       │
                                                        ▼
-                                              character_analysis
-                                                       ▼
-                                              beat_analysis
-                                                       ▼
-                                              storyboard_analysis
+                                              interleaved_analysis
                                                        ▼
                                                      write
                                                        ▼
                                                       END
 
-每个 ``*_analysis`` 节点的实现都是 **invoke 对应子-workflow 的 compiled graph**,
-而不是直接调内部函数。这样:
+**为什么 interleaved**:character / beat / storyboard 三阶段过去是串行跑完整本书
+(先抽完所有人物 → 再切完所有 beats → 再逐 beat 出分镜)。这种做法有副作用:
+beat / storyboard 看到的 character 是「读完整本书的剧透态」,弧光 X→Y 被提前
+透露,LLM 反而难写出渐进的人物动机。改成逐 batch 内交错跑后,beat / storyboard
+看到的 character 是「读到当前 batch 末尾的最新态」,跟人类阅读的体感一致。
 
-* 4 个 workflow(character / beat / storyboard / 本父-workflow)形态完全一致;
-* 子-workflow 独立跑时由 ``runner → manager.run(config)`` 触发,
-  父-workflow 调用时则注入 ``ingest_result`` 跳过 ingest 节点(由各子 workflow 的
-  ``set_conditional_entry_point`` 自动路由);
-* 后续给 novel_analysis 加缓存(读上次的 characters.json 跳过 character 子-workflow)
-  只需要在这一层加 cache 检查节点,子-workflow 不动。
+**节奏**(每个 batch 内,见 ``_node_interleaved_analysis``)::
 
-**场景的处理:** 本工程不维护独立的场景视觉档案。Beat agent 自己产出
+    extract_characters.extract_for_batch     → 更新 known_chars
+    extract_beats.extract_for_batch          → 更新 beats_so_far
+                                              (本批可重写末尾 K 段 = rewrite_window)
+    for b in beats_so_far[:-K] if not storyboarded:
+        storyboard_beat(b, known_chars, ...) → +1 集
+
+**跨批续写**:beat agent 每批必须复述/修订「末尾 K 段」(``rewrite_window``,默认 1),
+LLM 想接着写就重写 summary,想啥都不改就原样照抄。merge 端用前 K 项 in-place 改写
+``beats_so_far`` 末尾 K 段(index 沿用,related_batches 追加本批),其后追加新段。
+末尾 K 段属于 LLM 可改窗口,storyboard 暂不触发(冷却期);全书结束后一次性 flush。
+
+**子 workflow 的角色变化**:``character_analysis`` / ``beat_analysis`` /
+``storyboard_analysis`` 三个子-workflow **仍保留**,但 novel_analysis 不再
+``invoke`` 它们的 compiled graph。子-workflow 现在的定位是「dev / debug 时
+单独跑某一阶段的全书循环」(比如手工 review 整本书的 character),不再是
+novel_analysis 的子节点。
+
+**场景的处理**:本工程不维护独立的场景视觉档案。Beat agent 自己产出
 ``setting_refs`` 作为字符串 label,storyboard agent 在写每镜 ``description`` 时
 用原文 + LLM 常识把视觉环境写到画面里。所以这里没有 setting_analysis 子-workflow。
 """
@@ -54,21 +64,22 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, TypedDict
+from typing import Dict, List, Set, TypedDict
 
 from configs import RunConfig
+from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, load_and_batch_txt
 from skills.epub_to_txt import epub_to_txt
 from agents import extract_beats, extract_characters, extract_storyboard
-from agents.extract_beats import BeatList
-from agents.extract_characters import CharacterRoster
-from agents.extract_storyboard import ScreenplayAnalysis
-from skills.file_io import AgentLLMInfo, FinalReport, ReportMeta, write_final_report
-from workflows import (
-    beat_analysis,
-    character_analysis,
-    storyboard_analysis,
+from agents.extract_beats import Beat, BeatList
+from agents.extract_characters import Character, CharacterRoster
+from agents.extract_storyboard import (
+    Episode,
+    ScreenplayAnalysis,
+    Storyboard,
+    storyboard_beat,
 )
+from skills.file_io import AgentLLMInfo, FinalReport, ReportMeta, write_final_report
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +139,8 @@ class WorkflowState(TypedDict, total=False):
     max_total_chars: int
     target_episode_duration_sec: int
     recent_beats_window: int
+    rewrite_window: int
+    storyboard_prev_tail_window: int
 
     # --- detect_input / convert_epub 之后(ingest 节点会消费) ---
     txt_path: str
@@ -195,33 +208,116 @@ def _node_ingest_and_batch(state: WorkflowState) -> WorkflowState:
     return {"txt_path": str(src), "ingest_result": ing}
 
 
-def _node_character_analysis(state: WorkflowState, sub_graph: Any) -> WorkflowState:
-    """invoke 已编译的 character_analysis 子-workflow,ingest_result 已就位 → 跳过子图 ingest 节点。"""
-    final: character_analysis.State = sub_graph.invoke(
-        {"ingest_result": state["ingest_result"]}
+def _node_interleaved_analysis(state: WorkflowState) -> WorkflowState:
+    """逐 batch 交错跑 character → beat → 离开"复述区"的 beats 立即 storyboard。
+
+    模拟「读书」过程:character / beat 是渐进态,storyboard 看到的 character
+    是该 beat 离开 LLM 修订窗口那一刻的最新状态(而不是读完整本书后的剧透态)。
+
+    **节拍**(每 batch):
+
+    1) ``extract_characters.extract_for_batch``  → 更新 ``known_chars``
+    2) ``extract_beats.extract_for_batch``       → 更新 ``beats_so_far``;
+       本批 LLM 可以重写 ``beats_so_far`` 末尾 ``rewrite_window`` 段
+    3) 扫 ``beats_so_far[:-rewrite_window]``,尚未 storyboard 的 → 立刻 ``storyboard_beat``
+
+    **storyboard 冷却期**:末尾 ``rewrite_window`` 段还在 LLM 可改窗口内,不立即
+    送 storyboard;等下一批不再回看时(或全书结束)再送。
+
+    **尾部 flush**:全部 batch 跑完后,把仍在冷却期里的末尾 ``rewrite_window``
+    段一次性补 storyboard(那时再无下批,不会被改了)。
+    """
+    ing = state["ingest_result"]
+    target = state["target_episode_duration_sec"]
+    window = state["recent_beats_window"]
+    rewrite_window = state["rewrite_window"]
+    prev_tail_window = state["storyboard_prev_tail_window"]
+
+    known_chars: Dict[str, Character] = {}
+    beats_so_far: List[Beat] = []
+    storyboarded_idx: Set[int] = set()
+    episodes: List[Episode] = []
+    prev_tail: List[Storyboard] = []  # 上集末尾 K 镜,给下集做画面承接
+
+    batches = list(ing.batches)
+    batch_lookup: Dict[int, Batch] = {b.index: b for b in batches}
+
+    logger.info("=" * 60)
+    logger.info(
+        "[interleaved] 启动:共 %d 批,目标每集 %d 秒,近段窗口 %d,rewrite K=%d",
+        len(batches), target, window, rewrite_window,
     )
-    return {"characters": final["roster"]}
+    logger.info("=" * 60)
 
+    t_total = time.perf_counter()
+    for i, batch in enumerate(batches, start=1):
+        t_batch = time.perf_counter()
 
-def _node_beat_analysis(state: WorkflowState, sub_graph: Any) -> WorkflowState:
-    final: beat_analysis.State = sub_graph.invoke({
-        "ingest_result": state["ingest_result"],
-        "characters": state["characters"],
-        "target_duration_sec": state["target_episode_duration_sec"],
-        "context_window": state["recent_beats_window"],
-    })
-    return {"beats": final["beats"]}
+        extract_characters.extract_for_batch(
+            batch, known_chars, title=ing.title,
+        )
+        extract_beats.extract_for_batch(
+            batch, beats_so_far, known_chars,
+            title=ing.title,
+            target_duration_sec=target,
+            context_window=window,
+            rewrite_window=rewrite_window,
+        )
 
+        # 末尾 K 段还在 LLM 可改窗口里,先不送 storyboard
+        safe_until = len(beats_so_far) - rewrite_window
+        new_eps = 0
+        for bi, b in enumerate(beats_so_far[:safe_until]):
+            if b.index not in storyboarded_idx:
+                prev_b = beats_so_far[bi - 1] if bi > 0 else None
+                next_b = beats_so_far[bi + 1] if bi + 1 < len(beats_so_far) else None
+                ep = storyboard_beat(
+                    b, known_chars, batch_lookup,
+                    prev_beat=prev_b, next_beat=next_b,
+                    prev_tail_storyboards=prev_tail,
+                    target_duration_sec=target,
+                )
+                episodes.append(ep)
+                storyboarded_idx.add(b.index)
+                new_eps += 1
+                prev_tail = ep.storyboards[-prev_tail_window:] if (ep.storyboards and prev_tail_window > 0) else []
 
-def _node_storyboard_analysis(state: WorkflowState, sub_graph: Any) -> WorkflowState:
-    final: storyboard_analysis.State = sub_graph.invoke({
-        "ingest_result": state["ingest_result"],
-        "beats": state["beats"],
-        "characters": state["characters"],
-        "target_duration_sec": state["target_episode_duration_sec"],
-        "context_window": state["recent_beats_window"],
-    })
-    return {"screenplay": final["screenplay"]}
+        elapsed = time.perf_counter() - t_batch
+        logger.info(
+            "[interleaved] %d/%d (batch=%d) 完成,%.1f 秒。"
+            "累计 %d 人 / %d 段(冷却中 %d 段 → +%d 集,共 %d 集)",
+            i, len(batches), batch.index, elapsed,
+            len(known_chars), len(beats_so_far),
+            len(beats_so_far) - safe_until, new_eps, len(episodes),
+        )
+
+    # 全书结束:冷却期里剩下的 K 段一次 flush
+    for bi, b in enumerate(beats_so_far):
+        if b.index not in storyboarded_idx:
+            prev_b = beats_so_far[bi - 1] if bi > 0 else None
+            next_b = beats_so_far[bi + 1] if bi + 1 < len(beats_so_far) else None
+            ep = storyboard_beat(
+                b, known_chars, batch_lookup,
+                prev_beat=prev_b, next_beat=next_b,
+                prev_tail_storyboards=prev_tail,
+                target_duration_sec=target,
+            )
+            episodes.append(ep)
+            storyboarded_idx.add(b.index)
+            prev_tail = ep.storyboards[-prev_tail_window:] if (ep.storyboards and prev_tail_window > 0) else []
+
+    total_elapsed = time.perf_counter() - t_total
+    logger.info(
+        "[interleaved] 全部完成:%d 人 / %d 段 / %d 集,合计 %.1f 秒(%.1f 分钟)",
+        len(known_chars), len(beats_so_far), len(episodes),
+        total_elapsed, total_elapsed / 60,
+    )
+
+    return {
+        "characters": CharacterRoster(characters=list(known_chars.values())),
+        "beats":      BeatList(beats=beats_so_far),
+        "screenplay": ScreenplayAnalysis(episodes=episodes),
+    }
 
 
 def _node_write(state: WorkflowState) -> WorkflowState:
@@ -261,28 +357,23 @@ def _node_write(state: WorkflowState) -> WorkflowState:
 
 
 def build_graph():
-    """编译父 workflow。3 个子-workflow 的 compiled graph 在这里一次性建好,闭包注入节点。
+    """编译父 workflow。
+
+    `interleaved_analysis` 在单节点内做完三阶段的 batch 循环交错,所以这里不再
+    内嵌 character / beat / storyboard 三个子-graph(它们仍作为独立 workflow
+    保留,供 dev 单独跑某一层时用)。
 
     LLM 由各 agent 自治(``agents/extract_*/llm.json``),workflow 不再 build /
     传递 LLM。
     """
     from langgraph.graph import StateGraph, END
 
-    char_graph = character_analysis.build_graph()
-    beat_graph = beat_analysis.build_graph()
-    storyboard_graph = storyboard_analysis.build_graph()
-
     graph = StateGraph(WorkflowState)
 
     graph.add_node("detect_input", _node_detect_input)
     graph.add_node("convert_epub", _node_convert_epub)
     graph.add_node("ingest_and_batch", _node_ingest_and_batch)
-    graph.add_node("character_analysis",
-                   lambda s: _node_character_analysis(s, char_graph))
-    graph.add_node("beat_analysis",
-                   lambda s: _node_beat_analysis(s, beat_graph))
-    graph.add_node("storyboard_analysis",
-                   lambda s: _node_storyboard_analysis(s, storyboard_graph))
+    graph.add_node("interleaved_analysis", _node_interleaved_analysis)
     graph.add_node("write", _node_write)
 
     graph.set_entry_point("detect_input")
@@ -294,10 +385,8 @@ def build_graph():
     )
     graph.add_edge("convert_epub", "ingest_and_batch")
 
-    graph.add_edge("ingest_and_batch", "character_analysis")
-    graph.add_edge("character_analysis", "beat_analysis")
-    graph.add_edge("beat_analysis", "storyboard_analysis")
-    graph.add_edge("storyboard_analysis", "write")
+    graph.add_edge("ingest_and_batch", "interleaved_analysis")
+    graph.add_edge("interleaved_analysis", "write")
     graph.add_edge("write", END)
 
     return graph.compile()
@@ -325,9 +414,10 @@ def run(config: RunConfig) -> RunResult:
     setup_agent_traces(out_root)
     logger.info(
         "novel_analysis workflow 启动:input=%s output=%s max_batch_chars=%d "
-        "max_total_chars=%d episode=%ds window=%d recursion=%d",
+        "max_total_chars=%d episode=%ds window=%d rewrite_K=%d prev_tail_K=%d recursion=%d",
         config.input, out_root, config.max_batch_chars, config.max_total_chars,
         config.target_episode_duration_sec, config.recent_beats_window,
+        config.rewrite_window, config.storyboard_prev_tail_window,
         config.langgraph_recursion_limit,
     )
 
@@ -339,6 +429,8 @@ def run(config: RunConfig) -> RunResult:
         "max_total_chars": config.max_total_chars,
         "target_episode_duration_sec": config.target_episode_duration_sec,
         "recent_beats_window": config.recent_beats_window,
+        "rewrite_window": config.rewrite_window,
+        "storyboard_prev_tail_window": config.storyboard_prev_tail_window,
     }
 
     t_start = time.perf_counter()

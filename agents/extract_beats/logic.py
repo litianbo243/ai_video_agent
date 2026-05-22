@@ -2,26 +2,29 @@
 
 主 API:
 
-* ``extract_for_batch(batch, beats, characters, setting_names, ...)``
-    —— 1 次 LLM 调用 + 自动合并(包含 [待续] 段决策矩阵)
-    LLM 客户端从同包 ``llm`` 模块按需 lazy 取,caller 不再传
-    返回的 ``BeatExtraction`` 仅给 trace / debug 看,正常 caller 无需读
+* ``extract_for_batch(batch, beats, characters, ...)``
+    1 次 LLM 调用 + 自动合并
+* ``merge_delta(beats, delta, ...)`` —— 单独跑合并(notebook / 单测用)
 
-底层 API(单测 / notebook 用):
+LLM 客户端从同包 ``llm.json`` 按需 lazy 取,caller 不传。
+测试 mock:``from agents.extract_beats import set_llm; set_llm(fake)``。
 
-* ``merge_delta(beats, delta, batch_index, valid_characters, setting_names)``
-    —— 单独跑合并(给手工构造的 delta 用)
-* 测试时想 mock LLM:``from agents.extract_beats import set_llm; set_llm(fake)``
+**跨批续写机制**:每批 LLM 必须把「最近 ``rewrite_window`` 段大纲」的最新版
+(原样复述或修订过的版本)放在 ``BeatExtraction.beats`` 列表的**前 K 项**,
+其后才是本批新起的段。merge_delta 用前 K 项 in-place 改写 ``beats_so_far`` 的
+末尾 K 段(index 沿用,related_batches 追加本批),其后追加新段。
 
-workflow 只负责编排(batch 循环 + LangGraph 节点),不写合并语义。
+* K=0 → 纯增量,LLM 不修改历史;
+* K=1(默认)→ LLM 每批重看上批末段,可改可原样;
+* K>=2 → LLM 修订空间更大,token 成本随 K 线性增长。
 
-prompt 上下文:
+**场景**:本工程不维护场景视觉档案,``Beat.setting_refs`` 只是字符串 label,
+storyboard agent 写每镜 ``description`` 时把视觉环境写到画面里。beat agent 内部
+**不维护**跨 batch 的「场景 name 一致性池」(各 beat 独立产 setting_refs,
+跨 beat 同地点可能写成不同 name,storyboard 不在意因为它只看单 beat)。
 
-* 人物:全员详档(name + 别名 + background + personality),
-  `character_refs` 必须从详档里取 name。
-* 场景:**仅 name 集合**——本工程不维护场景视觉档案(由下游按场景生成)。
-  这里把历史 name 集给 beat agent,只是为了让它对同一物理地点**沿用同一个 name**
-  (避免"林家大厅"和"林家议事厅"指同一处)。
+prompt 上下文:全员人物详档(name + 别名 + background + personality);
+``character_refs`` 必须从详档取 name(``merge_delta`` 做白名单 + alias 规范化)。
 """
 
 from __future__ import annotations
@@ -46,34 +49,59 @@ get_llm, set_llm, set_trace_dir = make_agent_llm_manager(
 )
 
 
-def _filter_refs(
+def _normalize_character_refs(
     refs: List[str],
-    roster: Set[str],
+    characters: Dict[str, Character],
     *,
     batch_index: int,
-    field_name: str,
     beat_title: str = "",
 ) -> List[str]:
-    """LLM 写出的 refs 必须在 roster 里;不在的丢弃 + warn。
-    保留顺序、去重(同一 ref 只算一次)。
+    """对 LLM 写出的 character_refs 做白名单过滤 + alias → canonical name 规范化。
+
+    白名单 = ``characters`` 里所有 name ∪ 所有 aliases。
+    LLM 在 beat 里常用原文里更生动的别名(如「老七」),需要把它们映射回详档里的
+    canonical name(如「陈德志」)再存进 ``Beat.character_refs``,保证下游(storyboard
+    等)只跟 canonical name 打交道。
+
+    * 命中 name        → 原样保留
+    * 命中某 alias     → 替换为对应人物的 canonical name(debug log,不算 warn)
+    * 都不命中         → 丢弃 + warn
+
+    按规范化后的 name 去重、保留顺序。
     """
+    alias_to_name: Dict[str, str] = {}
+    for c in characters.values():
+        for a in c.aliases:
+            alias_to_name.setdefault(a, c.name)
+
     valid: List[str] = []
     invalid: List[str] = []
+    aliased: List[str] = []
     seen: Set[str] = set()
     for r in refs:
-        if r in seen:
-            continue
-        seen.add(r)
-        if r in roster:
-            valid.append(r)
+        if r in characters:
+            canonical = r
+        elif r in alias_to_name:
+            canonical = alias_to_name[r]
+            aliased.append(f"{r}→{canonical}")
         else:
             invalid.append(r)
+            continue
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        valid.append(canonical)
+
+    title_suffix = f"({beat_title})" if beat_title else ""
     if invalid:
         logger.warning(
-            "[beat_merge batch=%d] %s%s 出现未注册的引用 %s,已丢弃(roster=%d)",
-            batch_index, field_name,
-            f"({beat_title})" if beat_title else "",
-            invalid, len(roster),
+            "[beat_merge batch=%d] character_refs%s 出现未注册的引用 %s,已丢弃(roster=%d)",
+            batch_index, title_suffix, invalid, len(characters),
+        )
+    if aliased:
+        logger.debug(
+            "[beat_merge batch=%d] character_refs%s 别名规范化:%s",
+            batch_index, title_suffix, aliased,
         )
     return valid
 
@@ -90,6 +118,7 @@ def _dedup_keep_order(items: List[str]) -> List[str]:
 
 
 DEFAULT_CONTEXT_WINDOW = 10  # ``RunConfig.recent_beats_window`` 的兜底值
+DEFAULT_REWRITE_WINDOW = 1   # ``RunConfig.rewrite_window`` 的兜底值
 
 # 向后兼容别名:旧代码 / 测试可能 import 这个名字。新代码请从 RunConfig 取。
 CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW
@@ -98,66 +127,77 @@ CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW
 SYSTEM_PROMPT_TEMPLATE = """\
 你是中文小说改编编剧。把小说切成 Beat(剧情段),每段对应一集 ~{target_minutes} 分钟视频({target_duration} 秒)。
 
-每段要求:
-- 有戏剧分量:冲突 / 决断 / 反转 / 情绪爆发 / 重要发现
-- 不是单一动作、独白、过渡水分
+# 切分原则
+
+- 每段须有剧情推进(关系变化 / 信息揭示 / 决断 / 冲突 / 反转 / 情绪爆发 之类);
+  够撑一集 ~{target_minutes} 分钟的份量即可,**不必**次次戏剧大爆发
 - 粒度撑得起 ~{target_minutes} 分钟:太碎 → 合并,太重 → 拆分
-
-输出 BeatExtraction(JSON),三个字段:
-
-1. new_beats: 本批新起的段(数量按内容密度决定,无硬性上限)
-   - title: 2-6 字事件标题,不含地点。如「会议决裂」「揭穿身世」「夜袭仓库」
-   - summary: 1-2 句,讲清「谁在哪 / 做了什么 / 转折是什么」。不抄原文台词
-   - setting_refs: 涉及场景 name。已用过的沿用不改字;新地点用「宅院/机构+房间」组合(如「林家大厅」「沈宅书房」「明远集团会议室」),禁止裸名(「大厅」「广场」)
-   - character_refs: 所有出场人物 name,必须出自 prompt 里的人物详档
-
-2. continues_open_beat (bool): prompt 里若有标 [待续] 的段,本批是否在续写它?
-   - 没 [待续] 段 → 一律 false
-   - false 时禁止在 new_beats 里复制 [待续] 段的内容
-
-3. last_beat_open (bool): new_beats 末尾段是否戛然而止还没结束?
-   - 戛然而止(打斗未分胜负 / 长对话未决断)→ true,下一批续写
-   - 自然收束(胜败已定 / 散场)→ false
-   - new_beats 为空 → false
-
-[待续] 段决策矩阵(prompt 里有 [待续] 段时,4 选 1):
-- 接着写 + 再开新段 → continues=true, new_beats=[新段]
-- 只接着写         → continues=true, new_beats=[]
-- 不接,只新写     → continues=false, new_beats=[新段]
-- 啥也没干         → continues=false, new_beats=[]
-
-切分规则:
-- 典型密度:每 ~4-6K 字 1 段;无张力的过渡段宁可空输出,不要硬凑
-- 一批字数多就多出段,字数少就少出段;别为了"看着饱满"把过渡水分拔成 beat
+- 纯过渡水分(同一动作反复 / 无信息独白 / 走路过场)合到相邻段,不单开
 - 避免连续两段节奏雷同(都打斗 / 都对话)
+
+# 字段
+
+- title: 2-6 字事件标题,不含地点。例:「会议决裂」「揭穿身世」「夜袭仓库」
+- summary: 1-2 句,讲清「谁在哪 / 做了什么 / 转折是什么」;不抄原文台词
+- setting_refs: 涉及场景 name 列表
+  · 用「宅院/机构 + 房间」组合,如「林家大厅」「沈宅书房」「明远集团会议室」;
+    **禁止裸名**(「大厅」「广场」之类)
+  · 纯心理活动留空
+- character_refs: 所有出场人物 name(含无台词的),必须出自人物详档;
+  **统一用详档里的 name**,不要用别名(原文里叫「老 X」「X 总」之类,详档 name 是「张 X X」就写「张 X X」)
+
+# 增量输出规则(★ 严格遵守)
+
+本批的 ``beats`` 列表分两部分:
+
+1. **前 {rewrite_window} 项** 依次对应 prompt 里「最近 {rewrite_window} 段大纲」(标 [复述区] 的那几段)
+   · 本批原文延续了某段(揭示新细节 / 接续未完场景)→ **重写** 那段的 summary
+     覆盖完整剧情(不是追加,是改写,让 summary 一句话能讲清整段从头到尾)
+   · 本批原文与该段无关 → **原样复述**(title / summary 完全照抄,字面不变)
+   · 即使原样照抄也 **必须输出**,不要少出、不要合并、不要拆成两段
+   · title 觉得不准可以改,但段数严格保持 {rewrite_window}
+
+2. **其后** 是本批新起的段(数量按内容密度自行判断,无硬性上限)
+
+第 1 批没有 [复述区](rewrite_window=0),整个 ``beats`` 列表全是新起段。
 
 只输出 JSON。
 """
 
 
-def _build_system_prompt(target_duration_sec: int) -> str:
+def _build_system_prompt(
+    target_duration_sec: int,
+    rewrite_window: int = DEFAULT_REWRITE_WINDOW,
+) -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(
         target_duration=target_duration_sec,
         target_minutes=round(target_duration_sec / 60, 1)
         if target_duration_sec % 60
         else target_duration_sec // 60,
+        rewrite_window=rewrite_window,
     )
 
 
-# 默认 prompt(180s = 3 分钟),供单元测试 / notebook 直接看 prompt 文本时用。
-# 真实运行链路一律走 ``_build_system_prompt(target_duration_sec)``。
+# 默认 prompt(180s = 3 分钟 / rewrite_window=1),供单元测试 / notebook 直接看 prompt 文本时用。
+# 真实运行链路一律走 ``_build_system_prompt(target_duration_sec, rewrite_window)``。
 SYSTEM_PROMPT = _build_system_prompt(180)
 
 
-def _render_recent_beats(beats: List[Beat], window: int) -> str:
+def _render_recent_beats(
+    beats: List[Beat],
+    window: int,
+    rewrite_window: int,
+) -> str:
+    """渲染「最近 N 段大纲」,末尾 ``rewrite_window`` 段标 [复述区]。"""
     if not beats:
-        return "(暂无, 这是第 1 批)"
+        return "(暂无, 这是第 1 批,rewrite_window=0)"
     recent = beats[-window:] if window > 0 else beats
+    # 复述区:末尾 K 段(K 可能 > len(recent),取 min)
+    rewrite_start = max(0, len(recent) - rewrite_window)
     parts: List[str] = []
-    for b in recent:
+    for i, b in enumerate(recent):
         batches_str = ",".join(str(x) for x in b.related_batches) or "?"
-        # is_open 段加 [待续] 标记,prompt 里的"决策矩阵"会引导 LLM 处理
-        flag = " **[待续:上一批末尾未完成,本批承接的话置 continues_open_beat=true]**" if b.is_open else ""
+        flag = " **[复述区:请在 beats 前几项重新输出此段(原样或修订)]**" if i >= rewrite_start else ""
         line = f"段 {b.index} (batch {batches_str}) · {b.title}{flag}"
         if b.summary:
             line += f"\n  {b.summary}"
@@ -165,12 +205,6 @@ def _render_recent_beats(beats: List[Beat], window: int) -> str:
     if len(beats) > len(recent):
         parts.insert(0, f"(此前共 {len(beats)} 段,只展示最近 {len(recent)} 段)")
     return "\n".join(parts)
-
-
-def _render_name_index(names: List[str]) -> str:
-    if not names:
-        return "(暂无)"
-    return "\n".join(f"- {n}" for n in names)
 
 
 def _render_char_profile(ch: Character) -> str:
@@ -188,15 +222,16 @@ def _build_user_prompt(
     batch: Batch,
     beats_so_far: List[Beat],
     characters: Dict[str, Character],
-    setting_names: Set[str],
     title: str,
     *,
     context_window: int,
+    rewrite_window: int,
 ) -> str:
     book_title = title or "(未提供书名)"
     batch_text = batch.render_for_prompt()
-    recent = _render_recent_beats(beats_so_far, context_window)
-    setting_index = _render_name_index(sorted(setting_names))
+    # 第 1 批没有复述区,展示窗口仍按 context_window 取(实际为空)
+    effective_rewrite = min(rewrite_window, len(beats_so_far))
+    recent = _render_recent_beats(beats_so_far, context_window, effective_rewrite)
 
     char_profiles = (
         "\n\n".join(_render_char_profile(c) for c in characters.values())
@@ -205,14 +240,13 @@ def _build_user_prompt(
     )
 
     return (
-        f"书名: {book_title} | 第 {batch.index} 批\n\n"
-        f"=== 此前最近 {context_window} 段大纲 ===\n{recent}\n\n"
+        f"书名: {book_title} | 第 {batch.index} 批 | rewrite_window={effective_rewrite}\n\n"
+        f"=== 此前最近 {context_window} 段大纲(末尾 {effective_rewrite} 段为 [复述区])===\n{recent}\n\n"
         f"=== 全部已知人物详档({len(characters)} 人,character_refs 必须从这里取 name)===\n"
         f"{char_profiles}\n\n"
-        f"=== 已用过的场景 name({len(setting_names)} 处,同一地点沿用)===\n"
-        f"{setting_index}\n\n"
         f"=== 本批正文 ===\n{batch_text}\n\n"
-        f"输出 BeatExtraction JSON。"
+        f"输出 BeatExtraction JSON。beats 列表前 {effective_rewrite} 项 = [复述区]最新版,"
+        f"其后是本批新起段。"
     )
 
 
@@ -220,49 +254,43 @@ def extract_for_batch(
     batch: Batch,
     beats_so_far: List[Beat],
     characters: Dict[str, Character],
-    setting_names: Set[str],
     *,
     title: str = "",
     target_duration_sec: int = 180,
     context_window: int = DEFAULT_CONTEXT_WINDOW,
+    rewrite_window: int = DEFAULT_REWRITE_WINDOW,
 ) -> BeatExtraction:
-    """完整处理一批:LLM 抽取 → 合并入 ``beats_so_far`` / ``setting_names``(in-place)。
+    """完整处理一批:LLM 抽取 → 合并入 ``beats_so_far``(in-place)。
 
-    LLM 客户端由 ``agents.extract_beats.llm.get_llm()`` lazy 提供
-    (配置在同包 ``llm.json``),caller 不需要传。
+    返回 LLM 原始 delta,给 trace / debug 看;正常 caller 无需读。
 
-    返回 LLM 原始 delta,给 logger / trace / debug 看;默认调用方无需读它。
-    若想跳过自动合并(notebook 调试场景),可单独调 ``merge_delta``。
-
-    ``setting_names`` 是历史 batch 已经用过的场景 name 集合,既作为"沿用提示"
-    传给 LLM,又被 merge_delta 写入新出现的 name。本工程不维护场景视觉档案
-    ——视觉环境由 storyboarder 从原文 + LLM 常识写到每镜的 description 里。
-
-    ``target_duration_sec`` 来自 ``RunConfig.target_episode_duration_sec``,
-    用于让 LLM 把 beat 粒度跟单集时长对齐(切粒度太碎 / 太重都会反作用于
-    storyboarder 出镜数 / 单镜时长)。
-
-    ``context_window`` 来自 ``RunConfig.recent_beats_window``,控制 prompt 里
-    展示「此前最近 N 段大纲」的窗口大小。小模型 ctx 紧时调低,大模型可调高。
+    * ``target_duration_sec`` —— 单集目标时长(秒),LLM 用来对齐 beat 粒度
+    * ``context_window`` —— prompt 里展示「最近 N 段大纲」的窗口;小模型 ctx 紧时调小
+    * ``rewrite_window`` —— 本批 LLM 必须复述/修订的「末尾 K 段」数量。K=0 关闭
+      跨批续写(纯增量);K=1 默认(LLM 每批重看上批末段);K 越大 LLM 修订空间
+      越大但 token 成本越高。语义:LLM 输出 ``beats`` 列表前 K 项 = 「最近 K 段」
+      的最新版(原样或修订),其后是本批新起段
     """
+    effective_rewrite = min(rewrite_window, len(beats_so_far))
     llm = get_llm()
-    system = _build_system_prompt(target_duration_sec)
+    system = _build_system_prompt(target_duration_sec, rewrite_window=effective_rewrite)
     user_prompt = _build_user_prompt(
-        batch, beats_so_far, characters, setting_names, title,
+        batch, beats_so_far, characters, title,
         context_window=context_window,
+        rewrite_window=effective_rewrite,
     )
     logger.info(
-        "beat_extractor 第 %d 批(此前 %d 段 / 窗口 %d;已知人物 %d;"
-        "场景 name 池 %d;目标集时长 %ds),%s @ %s",
-        batch.index, len(beats_so_far), context_window, len(characters),
-        len(setting_names), target_duration_sec, llm.model, llm.base_url,
+        "beat_extractor 第 %d 批(此前 %d 段 / 窗口 %d / 复述 K=%d;已知人物 %d;"
+        "目标集时长 %ds),%s @ %s",
+        batch.index, len(beats_so_far), context_window, effective_rewrite,
+        len(characters), target_duration_sec, llm.model, llm.base_url,
     )
     delta = llm.chat_json(system, user_prompt, BeatExtraction)
-    logger.info("beat_extractor 第 %d 批产出:%d 段", batch.index, len(delta.new_beats))
+    logger.info("beat_extractor 第 %d 批产出:%d 段", batch.index, len(delta.beats))
     merge_delta(
         beats_so_far, delta, batch.index,
-        valid_characters=set(characters.keys()),
-        setting_names=setting_names,
+        characters=characters,
+        rewrite_window=effective_rewrite,
     )
     return delta
 
@@ -272,61 +300,67 @@ def merge_delta(
     delta: BeatExtraction,
     batch_index: int,
     *,
-    valid_characters: Set[str],
-    setting_names: Set[str],
+    characters: Dict[str, Character],
+    rewrite_window: int,
 ) -> None:
-    """把本批 LLM delta in-place 合并入 ``beats``;处理 [待续] 段决策矩阵。
+    """把本批 LLM delta in-place 合并入 ``beats``。
 
-    * ``character_refs`` 对 ``valid_characters`` 做白名单过滤
-      (character agent 是 character name 的权威源)
-    * ``setting_refs`` **不做**白名单过滤——beat agent 自己是 setting name 的权威源,
-      只去重 + 顺手把新 name 累加进 ``setting_names``
-    * ``is_open`` 不变量:全书任意时刻**最多 1 个**段 is_open=True。
+    **协议**:``delta.beats`` 前 K 项依次重写 ``beats`` 末尾 K 段(复述区),其后追加新段。
+    K = ``rewrite_window``(已根据 len(beats) 自动收缩,caller 保证 K ≤ len(beats))。
 
-    [待续] 段(``open_idx`` 处)的处置由 ``continues_open_beat`` ×
-    ``new_beats 是否非空`` 联合决定:
+    **白名单 + 规范化**:``character_refs`` 在 ``characters`` 的 name ∪ aliases 内
+    过滤,命中 alias 时自动改写为 canonical name(character agent 是 name 权威源);
+    ``setting_refs`` 只去重不过滤(每个 beat 自己的 setting label,跨 beat 不强约束)。
 
-    ====================  ==============  ==================================
-    continues_open_beat   new_beats       旧 [待续] 段去向
-    ====================  ==============  ==================================
-    False                 任意             step 2 显式 close
-    True                  empty           保持 open(本批纯续写,还没结束)
-    True                  非空             step 4 隐式 close(被新段接管)
-    ====================  ==============  ==================================
-
-    ``last_beat_open`` 只对 ``new_beats`` 末尾段生效,``new_beats`` 为空时无意义。
+    **复述区 ``related_batches``**:沿用旧段历史 ∪ 本批 ``batch_index``(去重),
+    无论 LLM 改没改 summary。
     """
-    open_idx = next((i for i, b in enumerate(beats) if b.is_open), None)
-
-    # 1. continues_open_beat=True → 把本 batch 加进 open 段的 related_batches
-    if delta.continues_open_beat:
-        if open_idx is None:
-            logger.warning(
-                "[beat_merge batch=%d] LLM 输出 continues_open_beat=true,"
-                "但 prompt 里没 [待续] 段,忽略",
-                batch_index,
-            )
-        else:
-            ob = beats[open_idx]
-            if batch_index not in ob.related_batches:
-                ob.related_batches.append(batch_index)
-
-    # 2. 上批 open 但本批 continues_open_beat=False → 强制 close
-    if open_idx is not None and not delta.continues_open_beat:
-        ob = beats[open_idx]
-        logger.info(
-            "[beat_merge batch=%d] 段 %d (%r) 上批标记 [待续],"
-            "本批 continues_open_beat=false,强制收束",
-            batch_index, ob.index, ob.title,
+    # 1. LLM 输出段数 < K → warn + 自动收缩(LLM 漏复述,把它已输出的当复述区)
+    K = rewrite_window
+    if len(delta.beats) < K:
+        logger.warning(
+            "[beat_merge batch=%d] LLM 输出 %d 段 < rewrite_window=%d,自动收缩 K=%d "
+            "(LLM 可能漏复述了 %d 段;保留历史末尾不变)",
+            batch_index, len(delta.beats), K, len(delta.beats), K - len(delta.beats),
         )
-        ob.is_open = False
+        K = len(delta.beats)
 
-    # 3. 处理 new_beats(append + 默认 is_open=False)
-    for draft in delta.new_beats:
+    # 2. 复述区:LLM 前 K 项重写 beats 末尾 K 段(in-place 改写,index 沿用)
+    for i in range(K):
+        draft = delta.beats[i]
+        target_idx = len(beats) - K + i  # 对齐到 beats 末尾 K 段的第 i 个
+        old = beats[target_idx]
         clean_setting_refs = _dedup_keep_order(draft.setting_refs)
-        clean_char_refs = _filter_refs(
-            draft.character_refs, valid_characters,
-            batch_index=batch_index, field_name="character_refs",
+        clean_char_refs = _normalize_character_refs(
+            draft.character_refs, characters,
+            batch_index=batch_index,
+            beat_title=draft.title,
+        )
+        new_related = list(old.related_batches)
+        if batch_index not in new_related:
+            new_related.append(batch_index)
+        # 覆盖 LLM 给出的字段,index / related_batches 由 server 维护
+        beats[target_idx] = Beat(
+            **{
+                **draft.model_dump(),
+                "setting_refs": clean_setting_refs,
+                "character_refs": clean_char_refs,
+            },
+            index=old.index,
+            related_batches=new_related,
+        )
+        if draft.title != old.title or draft.summary != old.summary:
+            logger.debug(
+                "[beat_merge batch=%d] 段 %d 复述区已修订:title=%r→%r",
+                batch_index, old.index, old.title, draft.title,
+            )
+
+    # 3. 复述区之后是本批新起段,append
+    for draft in delta.beats[K:]:
+        clean_setting_refs = _dedup_keep_order(draft.setting_refs)
+        clean_char_refs = _normalize_character_refs(
+            draft.character_refs, characters,
+            batch_index=batch_index,
             beat_title=draft.title,
         )
         beat = Beat(
@@ -339,31 +373,6 @@ def merge_delta(
             related_batches=[batch_index],
         )
         beats.append(beat)
-        setting_names.update(clean_setting_refs)
-
-    # 4. 决定最终 is_open 状态
-    if delta.new_beats:
-        new_tail = beats[-1]
-        for b in beats[:-1]:
-            if b.is_open:
-                b.is_open = False
-                logger.info(
-                    "[beat_merge batch=%d] 段 %d (%r) 上批 [待续],"
-                    "本批续写完成(continues=true + 又新写段 %d) → 由新段接管,收束",
-                    batch_index, b.index, b.title, new_tail.index,
-                )
-        new_tail.is_open = delta.last_beat_open
-        if delta.last_beat_open:
-            logger.info(
-                "[beat_merge batch=%d] 段 %d (%r) 标记 [待续],等下一批续写",
-                batch_index, new_tail.index, new_tail.title,
-            )
-    elif delta.last_beat_open:
-        logger.info(
-            "[beat_merge batch=%d] last_beat_open=true 但 new_beats 为空,忽略"
-            "(此字段仅对 new_beats 末尾段生效)",
-            batch_index,
-        )
 
 
 __all__ = [
@@ -373,4 +382,5 @@ __all__ = [
     "SYSTEM_PROMPT_TEMPLATE",
     "CONTEXT_WINDOW",
     "DEFAULT_CONTEXT_WINDOW",
+    "DEFAULT_REWRITE_WINDOW",
 ]

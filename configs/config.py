@@ -177,6 +177,31 @@ class RunConfig(BaseModel):
             "0 = 不展示历史 beats(冷启动 / 独立 batch 时用)。"
         ),
     )
+    rewrite_window: int = Field(
+        default=1,
+        ge=0,
+        le=10,
+        description=(
+            "beat agent 跨批续写窗口:每批 LLM 必须复述/修订「末尾 K 段」"
+            "(原样或修订均可),其后追加本批新起段。"
+            "0 = 关闭续写(纯增量,长戏剧段会被批边界切碎);"
+            "1 = 默认(LLM 每批重看上批末段,自然接续);"
+            ">=2 = 给 LLM 更大修订空间,token 成本随 K 线性增长。"
+            "同时是 storyboard 的「冷却期」:末尾 K 段还在可改窗口内,不立即送 storyboard。"
+        ),
+    )
+    storyboard_prev_tail_window: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description=(
+            "storyboard agent 的「上集承接窗口」:每集开始时把上集末尾 K 镜的"
+            "画面 / 服装 / 道具状态喂给 LLM 做集首承接镜头。"
+            "0 = 关闭(集间无视觉承接,每集独立定场);"
+            "3 = 默认(覆盖钩子镜 + 前 1-2 个铺垫镜,足够画面连续);"
+            ">=5 = 给 LLM 更长视觉记忆,token 成本随 K 线性增长。"
+        ),
+    )
     langgraph_recursion_limit: int = Field(
         default=50,
         gt=0,

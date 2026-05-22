@@ -16,9 +16,9 @@ lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
 
     set_trace_dir(out_dir)                                 # runner 顶层调一次
     delta = extract_for_batch(
-        batch, beats_so_far, char_dict, setting_names, title="...",
+        batch, beats_so_far, char_dict, title="...",
     )
-    # delta 已 in-place 合并入 beats_so_far / setting_names
+    # delta 已 in-place 合并入 beats_so_far
 
 测试 / notebook 想 mock LLM:``set_llm(fake_client)``,完事后 ``set_llm(None)``
 复位即可。
@@ -27,6 +27,7 @@ lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
 from agents.extract_beats.logic import (
     CONTEXT_WINDOW,
     DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_REWRITE_WINDOW,
     SYSTEM_PROMPT,
     extract_for_batch,
     get_llm,
@@ -48,6 +49,7 @@ __all__ = [
     "BeatList",
     "CONTEXT_WINDOW",
     "DEFAULT_CONTEXT_WINDOW",
+    "DEFAULT_REWRITE_WINDOW",
     "SYSTEM_PROMPT",
     "extract_for_batch",
     "merge_delta",

@@ -27,6 +27,7 @@ lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
 """
 
 from agents.extract_storyboard.logic import (
+    DEFAULT_PREV_TAIL_K,
     SYSTEM_PROMPT,
     get_llm,
     set_llm,
@@ -41,6 +42,7 @@ from agents.extract_storyboard.schema import (
 )
 
 __all__ = [
+    "DEFAULT_PREV_TAIL_K",
     "Episode",
     "ScreenplayAnalysis",
     "Storyboard",

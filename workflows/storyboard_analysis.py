@@ -1,31 +1,27 @@
-"""storyboard_analysis workflow:把每段 Beat 展开成一集分镜清单。
+"""storyboard_analysis workflow:逐批交错抽人物 + 切剧情段 +(closed beat 立即)出分镜。
 
-依赖 beat + character 产物,但**自己负责拿到它们**——内嵌
-``beat_analysis`` 子-graph(beat 又内嵌 character 子-graph),
-所以独立跑也能从 ``config`` 一路跑到分镜。runner 不做编排,只是薄壳。
+跟 ``novel_analysis`` 的批循环节拍完全一致(都是 char → beat → 新 closed beat
+立即 storyboard),保证独立跑这个 workflow 时拿到的结果跟 novel_analysis 内部
+跑出来的语义一致。唯一区别是本 workflow **不写 FinalReport**,只产
+character / beat / screenplay 三件套。
 
 DAG::
 
     START
       ▼
-    ingest ──▶ beat_analysis ──▶ analyze ──▶ END
+    ingest ──▶ analyze ──▶ END
 
-其中 ``beat_analysis`` 是子-workflow,内部还有自己的 character 节点。
-storyboard 这一层不重复写 char 节点,那是 beat 的职责。
-
-**幂等节点**:``ingest`` / ``beat_analysis`` 都先看 state 里对应输出是否已就位,
-有就 ``return {}`` 跳过。这样:
-
-* **独立跑**(``run(config)``):只给 ``config``,全链路跑完。
-* **被父 workflow 调**:已注入 ``ingest_result`` / ``characters`` /
-  ``beats``,storyboard 的 ingest + beat 节点全部 no-op,只跑 analyze。
+* **独立跑**(``run(config)``):2 步全跑。
+* **被父 workflow 调**:已注入 ``ingest_result``,ingest 节点 no-op,只跑 analyze。
 
 公开 API:
 
 * ``run(config) -> (IngestResult, CharacterRoster, BeatList, ScreenplayAnalysis)``
     顶层。
-* ``run_with_batches(beats, characters, batches, *, target_duration_sec=180, title="") -> ScreenplayAnalysis``
-    纯计算循环(逐 Beat 跑一次 LLM,产单集 Episode,组装成 ScreenplayAnalysis)。
+* ``run_with_batches(batches, *, title, target_duration_sec, context_window)
+   -> (CharacterRoster, BeatList, ScreenplayAnalysis)``
+    纯计算批循环(analyze 节点用,也可在 notebook 直接调)。注意:character /
+    beat 都是这个循环顺手产出的,不能再像旧版那样从外部传入。
 * ``build_graph()`` / ``State``
     LangGraph 编译 + 状态契约。
 
@@ -37,15 +33,26 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Iterable, List, Tuple, TypedDict
+from typing import Dict, Iterable, List, Set, Tuple, TypedDict
 
 from configs import RunConfig
 from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, ingest_book
-from agents.extract_beats import BeatList
+from agents import extract_beats, extract_characters
+from agents.extract_beats import (
+    Beat,
+    BeatList,
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_REWRITE_WINDOW,
+)
 from agents.extract_characters import Character, CharacterRoster
-from agents.extract_storyboard import Episode, ScreenplayAnalysis, storyboard_beat
-from workflows import beat_analysis
+from agents.extract_storyboard import (
+    DEFAULT_PREV_TAIL_K,
+    Episode,
+    ScreenplayAnalysis,
+    Storyboard,
+    storyboard_beat,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,78 +65,136 @@ logger = logging.getLogger(__name__)
 class State(TypedDict, total=False):
     """storyboard_analysis workflow 的状态(``TypedDict``)。
 
-    上游 4 个字段都是"父注入 或 节点自产";父 workflow 调 storyboard 时通常
-    全部已就位,对应节点会自动跳过。独立跑时只给 ``config`` 即可。
+    跟旧版相比:不再有 ``characters`` / ``beats`` 作为「上游产物」输入,
+    全部由本 workflow 内部跟 storyboard 交错产出。父 workflow 调本子-workflow
+    时只需注入 ``ingest_result``(+ 选填 target/window)。
     """
 
     config: RunConfig
     ingest_result: IngestResult
-    characters: CharacterRoster
-    beats: BeatList
-
-    # 可选(不给则用默认)
     target_duration_sec: int
     context_window: int
+    rewrite_window: int
+    prev_tail_window: int
 
     # 输出
+    characters: CharacterRoster
+    beats: BeatList
     screenplay: ScreenplayAnalysis
 
 
 # ---------------------------------------------------------------------------
-# 纯计算:逐 Beat 循环
+# 编排:批循环(analyze 节点 + 外部直接调用 共用)
 # ---------------------------------------------------------------------------
 
 
 def run_with_batches(
-    beats: BeatList,
-    characters: CharacterRoster,
     batches: Iterable[Batch],
     *,
-    target_duration_sec: int = 180,
     title: str = "",
-) -> ScreenplayAnalysis:
-    """跑完所有 Beat,返回 ScreenplayAnalysis(config-free 纯计算)。"""
-    beats_list = beats.beats
-    char_lookup: Dict[str, Character] = {c.name: c for c in characters.characters}
+    target_duration_sec: int = 180,
+    context_window: int = DEFAULT_CONTEXT_WINDOW,
+    rewrite_window: int = DEFAULT_REWRITE_WINDOW,
+    prev_tail_window: int = DEFAULT_PREV_TAIL_K,
+) -> Tuple[CharacterRoster, BeatList, ScreenplayAnalysis]:
+    """跑完所有 batch,顺带产出人物表 + 剧情段 + 分集分镜(config-free 纯计算)。
+
+    **节拍**(每 batch):
+
+    1) ``extract_characters.extract_for_batch``  → 更新 ``known_chars``
+    2) ``extract_beats.extract_for_batch``       → 更新 ``beats_so_far``;
+       LLM 可重写末尾 ``rewrite_window`` 段
+    3) 扫 ``beats_so_far[:-rewrite_window]``,尚未 storyboard 的 → 立刻
+       ``storyboard_beat``。末尾 K 段还在 LLM 可改窗口里,不送 storyboard
+
+    **尾部 flush**:全部 batch 跑完,把仍在冷却期的末尾 K 段一次性 storyboard
+    (那时再无下批,不会被改了)。
+    """
+    batches = list(batches)
+    known_chars: Dict[str, Character] = {}
+    beats_so_far: List[Beat] = []
+    storyboarded_idx: Set[int] = set()
+    episodes: List[Episode] = []
+    prev_tail: List[Storyboard] = []  # 上集末尾 K 镜,给下集做画面承接
     batch_lookup: Dict[int, Batch] = {b.index: b for b in batches}
 
     logger.info("=" * 60)
     logger.info(
-        "[storyboard_analysis] 启动:%d 段 → %d 集,目标每集 %d 秒",
-        len(beats_list), len(beats_list), target_duration_sec,
+        "[storyboard_analysis] 启动:共 %d 批,目标每集 %d 秒,近段窗口 %d,"
+        "rewrite K=%d,prev_tail K=%d",
+        len(batches), target_duration_sec, context_window, rewrite_window,
+        prev_tail_window,
     )
     logger.info("=" * 60)
 
     t_total = time.perf_counter()
-    episodes: List[Episode] = []
-    for i, beat in enumerate(beats_list, start=1):
-        logger.info(
-            "[storyboard_analysis] 第 %d/%d 集(beat #%d · %s)开始",
-            i, len(beats_list), beat.index, beat.title,
-        )
+    for i, batch in enumerate(batches, start=1):
         t0 = time.perf_counter()
-        ep = storyboard_beat(
-            beat, char_lookup, batch_lookup,
-            target_duration_sec=target_duration_sec,
+
+        extract_characters.extract_for_batch(
+            batch, known_chars, title=title,
         )
+        extract_beats.extract_for_batch(
+            batch, beats_so_far, known_chars,
+            title=title,
+            target_duration_sec=target_duration_sec,
+            context_window=context_window,
+            rewrite_window=rewrite_window,
+        )
+
+        # 末尾 K 段还在 LLM 可改窗口里,先不送 storyboard
+        safe_until = len(beats_so_far) - rewrite_window
+        new_eps = 0
+        for bi, b in enumerate(beats_so_far[:safe_until]):
+            if b.index not in storyboarded_idx:
+                prev_b = beats_so_far[bi - 1] if bi > 0 else None
+                next_b = beats_so_far[bi + 1] if bi + 1 < len(beats_so_far) else None
+                ep = storyboard_beat(
+                    b, known_chars, batch_lookup,
+                    prev_beat=prev_b, next_beat=next_b,
+                    prev_tail_storyboards=prev_tail,
+                    target_duration_sec=target_duration_sec,
+                )
+                episodes.append(ep)
+                storyboarded_idx.add(b.index)
+                new_eps += 1
+                prev_tail = ep.storyboards[-prev_tail_window:] if (ep.storyboards and prev_tail_window > 0) else []
+
         elapsed = time.perf_counter() - t0
         logger.info(
-            "[storyboard_analysis] 第 %d/%d 集完成,用时 %.1f 秒,产 %d 镜",
-            i, len(beats_list), elapsed, len(ep.storyboards),
+            "[storyboard_analysis] %d/%d (batch=%d) 完成,%.1f 秒。"
+            "累计 %d 人 / %d 段(冷却中 %d 段 → +%d 集,共 %d 集)",
+            i, len(batches), batch.index, elapsed,
+            len(known_chars), len(beats_so_far),
+            len(beats_so_far) - safe_until, new_eps, len(episodes),
         )
-        episodes.append(ep)
+
+    # 全书结束:冷却期里剩下的 K 段一次 flush
+    for bi, b in enumerate(beats_so_far):
+        if b.index not in storyboarded_idx:
+            prev_b = beats_so_far[bi - 1] if bi > 0 else None
+            next_b = beats_so_far[bi + 1] if bi + 1 < len(beats_so_far) else None
+            ep = storyboard_beat(
+                b, known_chars, batch_lookup,
+                prev_beat=prev_b, next_beat=next_b,
+                prev_tail_storyboards=prev_tail,
+                target_duration_sec=target_duration_sec,
+            )
+            episodes.append(ep)
+            storyboarded_idx.add(b.index)
+            prev_tail = ep.storyboards[-prev_tail_window:] if (ep.storyboards and prev_tail_window > 0) else []
 
     total_elapsed = time.perf_counter() - t_total
-    total_storyboards = sum(len(ep.storyboards) for ep in episodes)
     logger.info(
-        "[storyboard_analysis] 全部完成:%d 集 / %d 镜,合计用时 %.1f 秒(%.1f 分钟)",
-        len(episodes), total_storyboards, total_elapsed, total_elapsed / 60,
+        "[storyboard_analysis] 全部完成:%d 人 / %d 段 / %d 集,合计 %.1f 秒(%.1f 分钟)",
+        len(known_chars), len(beats_so_far), len(episodes),
+        total_elapsed, total_elapsed / 60,
     )
 
-    return ScreenplayAnalysis(
-        title=title,
-        logline="",  # 暂留空,后续可加专门的 logline_writer 子-workflow
-        episodes=episodes,
+    return (
+        CharacterRoster(characters=list(known_chars.values())),
+        BeatList(beats=beats_so_far),
+        ScreenplayAnalysis(episodes=episodes),
     )
 
 
@@ -139,45 +204,48 @@ def run_with_batches(
 
 
 def _node_ingest(state: State) -> State:
-    if "ingest_result" in state:
-        return {}
-    if "config" not in state:
-        raise RuntimeError("storyboard_analysis workflow 启动时既无 ingest_result 也无 config")
-    config = state["config"]
-    ing = ingest_book(
-        config.input,
-        max_batch_chars=config.max_batch_chars,
-        max_total_chars=config.max_total_chars,
-    )
-    return {"ingest_result": ing}
-
-
-def _node_beat_analysis(state: State, sub_graph: Any) -> State:
-    """invoke 已编译的 beat_analysis 子-graph,顺带把 characters 透传上来。"""
-    if "beats" in state:
-        return {}
-    inj: Dict[str, Any] = {"ingest_result": state["ingest_result"]}
-    if "characters" in state:
-        inj["characters"] = state["characters"]
-    if "target_duration_sec" in state:
-        inj["target_duration_sec"] = state["target_duration_sec"]
-    if "context_window" in state:
-        inj["context_window"] = state["context_window"]
-    final: beat_analysis.State = sub_graph.invoke(inj)
-    return {
-        "characters": final["characters"],
-        "beats":      final["beats"],
-    }
+    """ingest 顺手把 target_duration_sec / context_window / rewrite_window /
+    prev_tail_window 也从 config 里拎出来(只有独立跑会进此分支;父 workflow
+    调时这些通常已注入)。"""
+    out: State = {}
+    if "ingest_result" not in state:
+        if "config" not in state:
+            raise RuntimeError(
+                "storyboard_analysis workflow 启动时既无 ingest_result 也无 config"
+            )
+        config = state["config"]
+        ing = ingest_book(
+            config.input,
+            max_batch_chars=config.max_batch_chars,
+            max_total_chars=config.max_total_chars,
+        )
+        out["ingest_result"] = ing
+    if "target_duration_sec" not in state and "config" in state:
+        out["target_duration_sec"] = state["config"].target_episode_duration_sec
+    if "context_window" not in state and "config" in state:
+        out["context_window"] = state["config"].recent_beats_window
+    if "rewrite_window" not in state and "config" in state:
+        out["rewrite_window"] = state["config"].rewrite_window
+    if "prev_tail_window" not in state and "config" in state:
+        out["prev_tail_window"] = state["config"].storyboard_prev_tail_window
+    return out
 
 
 def _node_analyze(state: State) -> State:
     ing = state["ingest_result"]
-    screenplay = run_with_batches(
-        state["beats"], state["characters"], ing.batches,
-        target_duration_sec=state.get("target_duration_sec", 180),
+    characters, beats, screenplay = run_with_batches(
+        ing.batches,
         title=ing.title,
+        target_duration_sec=state.get("target_duration_sec", 180),
+        context_window=state.get("context_window", DEFAULT_CONTEXT_WINDOW),
+        rewrite_window=state.get("rewrite_window", DEFAULT_REWRITE_WINDOW),
+        prev_tail_window=state.get("prev_tail_window", DEFAULT_PREV_TAIL_K),
     )
-    return {"screenplay": screenplay}
+    return {
+        "characters": characters,
+        "beats":      beats,
+        "screenplay": screenplay,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -186,21 +254,15 @@ def _node_analyze(state: State) -> State:
 
 
 def build_graph():
-    """编译 storyboard_analysis workflow,内嵌 beat 子-graph(beat 又内嵌 character)。
-
-    LLM 由各 agent 自治,workflow 不再注入。"""
+    """编译 storyboard_analysis workflow(2 节点:ingest → analyze)。"""
     from langgraph.graph import StateGraph, END
-
-    beat_graph = beat_analysis.build_graph()
 
     g = StateGraph(State)
     g.add_node("ingest", _node_ingest)
-    g.add_node("beat_analysis", lambda s: _node_beat_analysis(s, beat_graph))
     g.add_node("analyze", _node_analyze)
 
     g.set_entry_point("ingest")
-    g.add_edge("ingest", "beat_analysis")
-    g.add_edge("beat_analysis", "analyze")
+    g.add_edge("ingest", "analyze")
     g.add_edge("analyze", END)
     return g.compile()
 
@@ -208,13 +270,10 @@ def build_graph():
 def run(
     config: RunConfig,
 ) -> Tuple[IngestResult, CharacterRoster, BeatList, ScreenplayAnalysis]:
-    """从 ``RunConfig`` 出发跑完整 storyboard workflow,顺带把 character + beat 也跑出来。"""
+    """从 ``RunConfig`` 出发跑完整 storyboard workflow,顺带把 character + beat
+    也跑出来。"""
     graph = build_graph()
-    final: State = graph.invoke({
-        "config": config,
-        "target_duration_sec": config.target_episode_duration_sec,
-        "context_window": config.recent_beats_window,
-    })
+    final: State = graph.invoke({"config": config})
     missing = [
         k for k in ("ingest_result", "characters", "beats", "screenplay")
         if k not in final

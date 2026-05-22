@@ -1,31 +1,32 @@
-"""beat_analysis workflow:把小说原文逐批切成"剧情大纲段"(Beat)。
+"""beat_analysis workflow:逐批交错抽人物 + 切剧情段。
 
-依赖 character 产物,但**自己负责拿到它**——内嵌 ``character_analysis`` 子-graph,
-跑出 roster 后再做 beat。runner 不再做编排,只是薄壳。
+跟 ``novel_analysis`` 的批循环节拍一致(都是「读到本批末尾的渐进 character →
+当批 beat」),所以独立跑这个 workflow 时 beat agent 看到的 character 跟
+novel_analysis 内的 beat agent 看到的完全一样,保证语义统一。
+
+唯一区别是本 workflow **不跑 storyboard**,只产 character + beat 两件套。
 
 DAG::
 
     START
       ▼
-    ingest ──▶ character_analysis ──▶ analyze ──▶ END
+    ingest ──▶ analyze ──▶ END
 
-**幂等节点**:``ingest`` / ``character_analysis`` 都先看 state 里对应输出是否已就位,
-有就 ``return {}`` 跳过。这样:
+* **独立跑**(``run(config)``):2 步全跑。
+* **被父 workflow 调**:已注入 ``ingest_result``,ingest 节点 no-op,只跑 analyze。
 
-* **独立跑**(``run(config)``):只给 ``config``,3 步全跑。
-* **被父 workflow 调**:已经注入 ``ingest_result`` / ``characters``,前 2 个节点全部 no-op,
-  只跑 analyze。
-
-**场景的处理:** beat agent 自己产出 ``setting_refs`` 作为字符串 label,跨 batch 时用
-"已用 name 集"提示 LLM 沿用——本工程不再维护独立的场景视觉档案,
-那是 storyboarder 从原文 + LLM 常识里写到每镜 ``description`` 的事。
+**场景的处理**:beat agent 自己产出 ``setting_refs`` 作为字符串 label,本工程
+不再维护独立的场景视觉档案,storyboarder 写每镜 ``description`` 时直接把视觉
+环境写到画面里。
 
 公开 API:
 
 * ``run(config) -> (IngestResult, CharacterRoster, BeatList)``
     顶层。
-* ``run_with_batches(batches, characters, *, title="") -> BeatList``
-    纯计算批循环(analyze 节点用,也可在 notebook 直接调)。
+* ``run_with_batches(batches, *, title, target_duration_sec, context_window)
+   -> (CharacterRoster, BeatList)``
+    纯计算批循环(analyze 节点用,也可在 notebook 直接调)。注意:character
+    是这个循环顺手产出的,不能再像旧版那样从外部传入。
 * ``build_graph()`` / ``State``
     LangGraph 编译 + 状态契约。
 
@@ -37,19 +38,19 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Iterable, List, Set, Tuple, TypedDict
+from typing import Dict, Iterable, List, Set, Tuple, TypedDict
 
 from configs import RunConfig
 from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, ingest_book
+from agents import extract_beats, extract_characters
 from agents.extract_beats import (
     Beat,
     BeatList,
     DEFAULT_CONTEXT_WINDOW,
-    extract_for_batch,
+    DEFAULT_REWRITE_WINDOW,
 )
 from agents.extract_characters import Character, CharacterRoster
-from workflows import character_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +63,8 @@ logger = logging.getLogger(__name__)
 class State(TypedDict, total=False):
     """beat_analysis workflow 的状态(``TypedDict``)。
 
-    上游 3 个字段都是"父注入 或 节点自产":父 workflow 调 beat 时通常
-    ``ingest_result`` / ``characters`` 都已就位,对应节点会自动跳过。
-    独立跑时只给 ``config``,workflow 自己把链路拉满。
+    跟旧版相比:不再有 ``characters`` 作为「上游产物」输入,character 由本 workflow
+    内部跟 beat 交错产出。父 workflow 调本子-workflow 时只需注入 ``ingest_result``。
 
     ``target_duration_sec`` 用来对齐 beat 切粒度(短视频 → 单集紧凑,长视频 →
     单集可承载更多剧情)。独立跑时从 ``config.target_episode_duration_sec`` 取;
@@ -72,73 +72,89 @@ class State(TypedDict, total=False):
 
     ``context_window`` 控制 beat agent 在 prompt 里展示的「此前最近 N 段」窗口大小,
     独立跑时从 ``config.recent_beats_window`` 取;父 workflow 调时直接注入。
+
+    ``rewrite_window`` 控制每批 LLM 必须复述/修订的「末尾 K 段」数量,独立跑时
+    从 ``config.rewrite_window`` 取。
     """
 
-    # 启动注入(独立跑给 config / 父调给其余几项)
+    # 启动注入(独立跑给 config / 父调给 ingest_result + 选填 target/window)
     config: RunConfig
     ingest_result: IngestResult
-    characters: CharacterRoster
     target_duration_sec: int
     context_window: int
+    rewrite_window: int
 
     # 输出
+    characters: CharacterRoster
     beats: BeatList
 
 
 # ---------------------------------------------------------------------------
-# 编排:批循环
-# 抽取与合并的具体逻辑都在 agents.extract_beats 内。
+# 编排:批循环(analyze 节点 + 外部直接调用 共用)
 # ---------------------------------------------------------------------------
 
 
 def run_with_batches(
     batches: Iterable[Batch],
-    characters: CharacterRoster,
     *,
     title: str = "",
     target_duration_sec: int = 180,
     context_window: int = DEFAULT_CONTEXT_WINDOW,
-) -> BeatList:
-    """跑完所有 batch,返回合并后的剧情段列表(config-free 纯计算)。
+    rewrite_window: int = DEFAULT_REWRITE_WINDOW,
+) -> Tuple[CharacterRoster, BeatList]:
+    """跑完所有 batch,顺带产出人物表 + 剧情段列表(config-free 纯计算)。
 
-    ``target_duration_sec`` 透传给 ``extract_for_batch``,让 beat 粒度跟
-    单集目标时长对齐。``context_window`` 控制 prompt 里展示的最近 beats 数量。
+    **节拍**(每 batch):
+
+    1) ``extract_characters.extract_for_batch`` 更新 ``known_chars``
+    2) ``extract_beats.extract_for_batch`` 更新 ``beats_so_far``;LLM 可以
+       重写 ``beats_so_far`` 末尾 ``rewrite_window`` 段(自然跨批续写)
     """
     batches = list(batches)
-    char_lookup: Dict[str, Character] = {c.name: c for c in characters.characters}
-    setting_names: Set[str] = set()
-    beats: List[Beat] = []
+    known_chars: Dict[str, Character] = {}
+    beats_so_far: List[Beat] = []
 
     logger.info("=" * 60)
     logger.info(
-        "[beat_analysis] 启动:共 %d 批,人物名录 %d 人,目标集时长 %d 秒,"
-        "近段窗口 %d",
-        len(batches), len(char_lookup), target_duration_sec, context_window,
+        "[beat_analysis] 启动:共 %d 批,目标每集 %d 秒,近段窗口 %d,rewrite K=%d",
+        len(batches), target_duration_sec, context_window, rewrite_window,
     )
     logger.info("=" * 60)
 
     t_total = time.perf_counter()
     for i, batch in enumerate(batches, start=1):
         t0 = time.perf_counter()
-        extract_for_batch(
-            batch, beats, char_lookup, setting_names,
-            title=title, target_duration_sec=target_duration_sec,
-            context_window=context_window,
+
+        extract_characters.extract_for_batch(
+            batch, known_chars, title=title,
         )
+        extract_beats.extract_for_batch(
+            batch, beats_so_far, known_chars,
+            title=title,
+            target_duration_sec=target_duration_sec,
+            context_window=context_window,
+            rewrite_window=rewrite_window,
+        )
+
         elapsed = time.perf_counter() - t0
         logger.info(
-            "[beat_analysis] %d/%d (batch=%d) 完成,用时 %.1f 秒。"
-            "累计 %d 段 / %d 处场景 name",
-            i, len(batches), batch.index, elapsed, len(beats), len(setting_names),
+            "[beat_analysis] %d/%d (batch=%d) 完成,%.1f 秒。"
+            "累计 %d 人 / %d 段",
+            i, len(batches), batch.index, elapsed,
+            len(known_chars), len(beats_so_far),
         )
 
     total_elapsed = time.perf_counter() - t_total
     logger.info(
-        "[beat_analysis] 全部完成:%d 段 / %d 处场景 name,合计用时 %.1f 秒(%.1f 分钟)",
-        len(beats), len(setting_names), total_elapsed, total_elapsed / 60,
+        "[beat_analysis] 全部完成:%d 人 / %d 段,合计 %.1f 秒(%.1f 分钟)",
+        len(known_chars), len(beats_so_far),
+        total_elapsed, total_elapsed / 60,
     )
 
-    return BeatList(beats=beats)
+    return (
+        CharacterRoster(characters=list(known_chars.values())),
+        BeatList(beats=beats_so_far),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -166,28 +182,21 @@ def _node_ingest(state: State) -> State:
         out["target_duration_sec"] = state["config"].target_episode_duration_sec
     if "context_window" not in state and "config" in state:
         out["context_window"] = state["config"].recent_beats_window
+    if "rewrite_window" not in state and "config" in state:
+        out["rewrite_window"] = state["config"].rewrite_window
     return out
-
-
-def _node_character_analysis(state: State, sub_graph: Any) -> State:
-    """invoke 已编译的 character_analysis 子-graph。"""
-    if "characters" in state:
-        return {}
-    final: character_analysis.State = sub_graph.invoke(
-        {"ingest_result": state["ingest_result"]}
-    )
-    return {"characters": final["roster"]}
 
 
 def _node_analyze(state: State) -> State:
     ing = state["ingest_result"]
-    beats = run_with_batches(
-        ing.batches, state["characters"],
+    characters, beats = run_with_batches(
+        ing.batches,
         title=ing.title,
         target_duration_sec=state.get("target_duration_sec", 180),
         context_window=state.get("context_window", DEFAULT_CONTEXT_WINDOW),
+        rewrite_window=state.get("rewrite_window", DEFAULT_REWRITE_WINDOW),
     )
-    return {"beats": beats}
+    return {"characters": characters, "beats": beats}
 
 
 # ---------------------------------------------------------------------------
@@ -196,20 +205,15 @@ def _node_analyze(state: State) -> State:
 
 
 def build_graph():
-    """编译 beat_analysis workflow,内嵌 character 子-graph。LLM 由各 agent 自治。"""
+    """编译 beat_analysis workflow(2 节点:ingest → analyze)。"""
     from langgraph.graph import StateGraph, END
-
-    char_graph = character_analysis.build_graph()
 
     g = StateGraph(State)
     g.add_node("ingest", _node_ingest)
-    g.add_node("character_analysis",
-               lambda s: _node_character_analysis(s, char_graph))
     g.add_node("analyze", _node_analyze)
 
     g.set_entry_point("ingest")
-    g.add_edge("ingest", "character_analysis")
-    g.add_edge("character_analysis", "analyze")
+    g.add_edge("ingest", "analyze")
     g.add_edge("analyze", END)
     return g.compile()
 

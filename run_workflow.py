@@ -101,7 +101,6 @@ def run_beat_analysis(config_path: Path) -> None:
         beats.model_dump_json(indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
-    setting_names = sorted({s for b in beats.beats for s in b.setting_refs})
     print()
     print("=" * 60)
     print(f"完成。输出目录:{out_dir}")
@@ -111,7 +110,6 @@ def run_beat_analysis(config_path: Path) -> None:
     print(f"  LLM:     {_format_agent_llms()}")
     print(f"  人物表:   {len(roster.characters)} 位")
     print(f"  剧情段:   {len(beats.beats)} 段")
-    print(f"  场景 name: {len(setting_names)} 处")
     print("产物文件:")
     for kind, path in out_paths.items():
         print(f"  - {kind:>10}  {path}")
@@ -142,7 +140,6 @@ def run_storyboard_analysis(config_path: Path) -> None:
     )
 
     storyboard_total = sum(len(ep.storyboards) for ep in screenplay.episodes)
-    setting_names = sorted({s for b in beats.beats for s in b.setting_refs})
     print()
     print("=" * 60)
     print(f"完成。输出目录:{out_dir}")
@@ -152,7 +149,6 @@ def run_storyboard_analysis(config_path: Path) -> None:
     print(f"  LLM:     {_format_agent_llms()}")
     print(f"  人物表:   {len(roster.characters)} 位")
     print(f"  剧情段:   {len(beats.beats)} 段")
-    print(f"  场景 name: {len(setting_names)} 处")
     print(f"  分集:     {len(screenplay.episodes)} 集")
     print(f"  分镜:     {storyboard_total} 镜")
     print("产物文件:")
@@ -172,7 +168,6 @@ def run_novel_analysis(config_path: Path) -> None:
     print("=" * 60)
     print(f"完成。输出目录:{result.output_dir}")
     report = result.report
-    setting_names = sorted({s for b in report.beats.beats for s in b.setting_refs})
     print(f"  书名:    {report.meta.title or '(无)'}")
     print(f"  字数:    {report.meta.total_chars}")
     print(f"  批次数:  {report.meta.batch_count}")
@@ -182,7 +177,6 @@ def run_novel_analysis(config_path: Path) -> None:
             print(f"    - {name}: {info.model} @ {info.base_url}")
     print(f"  人物表:   {len(report.characters.characters)} 位")
     print(f"  剧情段:   {len(report.beats.beats)} 段")
-    print(f"  场景 name: {len(setting_names)} 处")
     print(f"  分集:     {len(report.screenplay.episodes)} 集")
     storyboard_total = sum(len(ep.storyboards) for ep in report.screenplay.episodes)
     print(f"  分镜:     {storyboard_total} 镜")
@@ -203,6 +197,6 @@ if __name__ == "__main__":
     config_path = Path("configs/grok_config.json")
 
     # run_novel_analysis(config_path)
-    run_character_analysis(config_path)
+    # run_character_analysis(config_path)
     # run_beat_analysis(config_path)
-    # run_storyboard_analysis(config_path)
+    run_storyboard_analysis(config_path)
