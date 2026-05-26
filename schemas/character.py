@@ -1,15 +1,9 @@
-"""extract_characters agent 的数据契约。
+"""人物相关数据契约(``extract_characters`` agent 产出 + workflow 聚合)。
 
 * ``CharacterDraft``      —— LLM 产出的初稿(无 ``index``)
 * ``Character``           —— 合并后完整档案(含 ``index``)
-* ``CharacterRoster``     —— 一次 run 的全部人物
+* ``CharacterList``     —— 一次 run 的全部人物(落盘格式)
 * ``CharacterExtraction`` —— 单次 LLM 调用的输出包装
-
-**写 schema 注意**:class docstring 和 field description 都会经
-``model_json_schema()`` 塞进 LLM 的 system prompt,所以只写"是什么 + 怎么填 +
-微例",**不放** ``logic.py:xxx`` / "workflow 内部" 这类 LLM 看不懂的内部引用,
-也**不复述**决策规则(权威源在 ``logic.py:SYSTEM_PROMPT``)。维护指引只放本
-模块 docstring —— Pydantic 不抓模块级 docstring。
 """
 
 from __future__ import annotations
@@ -45,7 +39,11 @@ class CharacterDraft(BaseModel):
     )
     personality: str = Field(
         default="",
-        description="跨章节稳定的整段性格画像(模式级,非事件级);上限约 300 字",
+        description="整段性格画像(模式级 / 默认态);上限约 300 字",
+    )
+    arc: str = Field(
+        default="",
+        description="剧情弧光(累积时序锚点,append-only);无弧光留空;上限约 280 字",
     )
 
 
@@ -55,7 +53,7 @@ class Character(CharacterDraft):
     index: int = Field(default=0, description="全局编号,1-based")
 
 
-class CharacterRoster(BaseModel):
+class CharacterList(BaseModel):
     """整本小说累积的全部人物档案(落盘格式)。"""
 
     characters: List[Character] = Field(default_factory=list)
@@ -74,5 +72,5 @@ __all__ = [
     "Character",
     "CharacterDraft",
     "CharacterExtraction",
-    "CharacterRoster",
+    "CharacterList",
 ]

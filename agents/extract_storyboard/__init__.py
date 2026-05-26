@@ -1,10 +1,17 @@
-"""extract_storyboard agent:把一段 Beat 展开成一集分镜(1 次 LLM 调用)。
+"""extract_storyboard agent:一集所含 N 段 Beat → 一集**叙事分镜**(1 次 LLM 调用)。
 
-给定 Beat + 关联场景/人物档案 + Beat 对应的原文 batches,LLM 直接产出本集
-~15-30 个分镜(``Episode``)。
+**职责切分**:本 agent 只管「讲什么」(intent / characters / setting /
+speaker / dialogue / voiceover + 集层 ``director_intent``),
+镜头视觉(景别 / 运镜 / 起始画面 / 时长)由下游 ``shot_director`` agent 负责。
+workflow 调 ``merge_episode`` 把两份按 index 合并成完整 ``Episode``。
 
-注:"extract" 这个动词其实不太达意——其它三个 agent 是从原文里抽取已存在
-的实体,这里更像是创作。命名按 ``agents/`` 下统一的 ``extract_*`` 前缀走。
+**输入颗粒度**:本 agent 处理的是"一集"(由 ``episode_planner`` 给出
+``EpisodePlan`` + 对应的 N 段 ``Beat``),不是"一段 beat"。1 集 = N 段
+beat,跨 batch 原文已自动拼接。
+
+注:agent 名仍叫 ``extract_storyboard``(对应 ``agents/`` 下统一的 ``extract_*``
+前缀),但产物已经从「完整 Storyboard」收窄为「叙事维度」,输入颗粒度也
+从 beat 升级为 episode。
 
 LLM 配置 / 客户端是 agent 自治的:配置住在 ``llm.json``,首次调用时按需
 lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
@@ -12,15 +19,26 @@ lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
 公开 API::
 
     from agents.extract_storyboard import (
-        storyboard_beat,
-        Storyboard, Episode, ScreenplayAnalysis, StoryboardList,
+        narrate_episode,
+        merge_episode,
+        DEFAULT_PREV_TAIL_K,
         get_llm, set_llm, set_trace_dir,
     )
-
-    set_trace_dir(out_dir)                                 # runner 顶层调一次
-    ep: Episode = storyboard_beat(
-        beat, char_dict, batch_dict, target_duration_sec=180,
+    from schemas import (
+        NarrativeShot, NarrativeShotList,
+        Storyboard, Episode, ScreenplayAnalysis,
     )
+
+    set_trace_dir(out_dir)                                  # runner 顶层调一次
+    narrative = narrate_episode(
+        ep_index=1, plan=plan, member_beats=beats_in_ep,
+        characters=char_dict, batches=batch_dict,
+    )
+    # 再调 shot_director.direct_episode → ShotDirectionList
+    # 最后 merge_episode(ep_index=1, plan=plan, narrative=..., direction=...) → Episode
+
+**schema 不在本模块 re-export**:所有 Pydantic 数据契约集中在顶层 ``schemas/``
+包,业务代码请直接 ``from schemas import X``。
 
 测试 / notebook 想 mock LLM:``set_llm(fake_client)``,完事后 ``set_llm(None)``
 复位即可。
@@ -30,26 +48,18 @@ from agents.extract_storyboard.logic import (
     DEFAULT_PREV_TAIL_K,
     SYSTEM_PROMPT,
     get_llm,
+    merge_episode,
+    narrate_episode,
     set_llm,
     set_trace_dir,
-    storyboard_beat,
-)
-from agents.extract_storyboard.schema import (
-    Episode,
-    ScreenplayAnalysis,
-    Storyboard,
-    StoryboardList,
 )
 
 __all__ = [
     "DEFAULT_PREV_TAIL_K",
-    "Episode",
-    "ScreenplayAnalysis",
-    "Storyboard",
-    "StoryboardList",
     "SYSTEM_PROMPT",
-    "storyboard_beat",
     "get_llm",
+    "merge_episode",
+    "narrate_episode",
     "set_llm",
     "set_trace_dir",
 ]

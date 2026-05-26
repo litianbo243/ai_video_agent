@@ -22,7 +22,7 @@ from skills.file_io import (
 ```
 {output_dir}/
 ├── screenplay.json / .md     # ScreenplayAnalysis(分集 + 每集分镜)
-├── characters.json / .md     # CharacterRoster
+├── characters.json / .md     # CharacterList
 ├── beats.json / .md          # BeatList(beat.setting_refs 是字符串 label,无独立档案)
 └── meta.json                 # ReportMeta
 ```

@@ -24,14 +24,20 @@ agent 之间不互相 import 运行逻辑;跨 agent 数据流靠 workflow state 
         │
         ▼  IngestResult(title, batches, ...)
    ┌────┴────────────────────────────────────────────────────────┐
-   │  3 个 agent,workflow 按依赖串调                              │
+   │  4 个 agent,workflow 按依赖串调                              │
    │                                                              │
-   │  agents/extract_characters ─→ CharacterRoster               │
+   │  agents/extract_characters ─→ CharacterList               │
    │  agents/extract_beats      ─→ BeatList                      │
    │       (依赖 roster;场景 name 由本 agent 自己产出)            │
-   │  agents/extract_storyboard ─→ ScreenplayAnalysis            │
+   │  agents/extract_storyboard ─→ NarrativeShotList       │
    │       (依赖 beats + roster + batches,逐 beat 调一次 LLM;     │
-   │        场景视觉环境从原文 + LLM 常识写到每镜 description)      │
+   │        只产**叙事维度**:谁 / 在哪 / 说什么 / 想什么 + intent)   │
+   │  agents/shot_director       ─→ ShotDirectionList             │
+   │       (拿到叙事分镜后,逐集调一次 LLM 配视觉:景别 / 运镜 /    │
+   │        起始画面 / 时长 + 集层视觉调性)                        │
+   │                                                              │
+   │  → workflow 按 index 合并 → 完整 Storyboard / Episode /       │
+   │                              ScreenplayAnalysis              │
    └────────────────────────────────────────────────────────────┘
         │
         ▼
@@ -46,8 +52,13 @@ agent 之间不互相 import 运行逻辑;跨 agent 数据流靠 workflow state 
 ```
 
 > **场景的处理:** 本工程不维护独立的场景视觉档案。Beat 内 ``setting_refs`` 是字符串
-> label(如「萧家大厅」),用于跨集场景一致性;每镜的视觉环境由 storyboard agent 从
-> 原文 + LLM 常识写到 ``Storyboard.description`` 里。
+> label(如「萧家大厅」),用于跨集场景一致性;每镜的视觉环境由 ``shot_director``
+> agent 从原文 + 人物档案 + LLM 常识写到 ``Storyboard.description`` 里。
+>
+> **storyboard 为何拆 2 个 agent**:一次 LLM 既写剧本又当摄影指导职责太重导致两边
+> 都不深入。拆开后 ``extract_storyboard`` 只看故事节奏(讲什么),``shot_director``
+> 拿到锁定的叙事后专心做视觉决策(怎么拍)。代价是每集 2 次 LLM 调用,换来 2 个
+> prompt 都更专注,产出质量更可控。
 
 每个 workflow 都可以**单独跑**(见 [run_workflow.py](run_workflow.py));workflow 内部会按需调起依赖的上游 workflow 或 agent。MCP 是预留给*外部*服务的 —— 详见 [`mcp_connectors/README.md`](mcp_connectors/README.md)。
 
@@ -62,7 +73,8 @@ ai_video_agent/
 │   │   ├── schema.py              #   I/O 契约(Character / Roster / Extraction)
 │   │   └── llm.json               #   本 agent 的 LLMConfig
 │   ├── extract_beats/             # 依赖 character schema;场景 name 由本 agent 产出
-│   └── extract_storyboard/        # 依赖前两个 schema;单 beat → 一集分镜
+│   ├── extract_storyboard/        # 依赖前两个 schema;单 beat → 一集**叙事分镜**
+│   └── shot_director/             # 叙事分镜 → 一集**视觉指导**(景别/运镜/起始画面/时长)
 ├── skills/                        # 确定性原语,不调 LLM
 │   ├── epub_to_txt/
 │   ├── batch_chapters/
@@ -72,7 +84,8 @@ ai_video_agent/
 ├── workflows/                     # LangGraph DAG,组合 agent + skill
 │   ├── character_analysis.py
 │   ├── beat_analysis.py           # 内部跑 character,再串到 beat
-│   ├── storyboard_analysis.py     # 内部跑 beat_analysis,逐 beat 调 storyboard agent
+│   ├── storyboard_analysis.py     # 内部跑 beat_analysis,逐 beat 调 episode_pipeline
+│   ├── episode_pipeline.py        # 一段 Beat → 一集 Episode(narrate + direct + merge)
 │   └── novel_analysis.py          # 顶层:全跑一遍,落 FinalReport
 ├── configs/
 │   ├── run_config.py              # RunConfig(纯流水线参数;LLMConfig 已下放到 llm/)
@@ -147,7 +160,8 @@ storyboard agent 可以用便宜的对话模型(批量生成分镜),互不耦合
 ```
 agents/extract_characters/llm.json   ← character agent 用的 LLM
 agents/extract_beats/llm.json        ← beat agent 用的 LLM
-agents/extract_storyboard/llm.json   ← storyboard agent 用的 LLM
+agents/extract_storyboard/llm.json   ← 叙事分镜师 agent 用的 LLM
+agents/shot_director/llm.json        ← 镜头导演 agent 用的 LLM(视觉决策)
 ```
 
 每个文件就一份 `LLMConfig`:
@@ -165,7 +179,7 @@ agents/extract_storyboard/llm.json   ← storyboard agent 用的 LLM
 
 > **API key 不要放在 JSON 里**,走 `.env` / 环境变量,通过 `api_key_env` 字段指明读哪个变量。这样 JSON 可以放心入 git。
 >
-> 三个 agent 可以共用同一个 LLM(默认就是),也可以各点各家——比如 character 用 OpenAI,beat 用 DeepSeek,storyboard 用本地 ollama。
+> 四个 agent 可以共用同一个 LLM(默认就是),也可以各点各家——比如 character 用 OpenAI,beat 用 DeepSeek,叙事分镜用 Claude,shot_director 用本地 ollama。
 
 LLM trace 自动按 agent 分文件落到 `<out_dir>/llm_trace/<agent_name>.{jsonl, .dir/}`,
 便于事后定位是哪个 agent 哪一批的调用。
@@ -280,7 +294,7 @@ result = novel_analysis.run(config)  # 落 screenplay.json/.md + characters.json
 |---|---|
 | `character_analysis` | `agents/extract_characters` |
 | `beat_analysis` | character_analysis + `agents/extract_beats` |
-| `storyboard_analysis` | beat_analysis + `agents/extract_storyboard` |
+| `storyboard_analysis` | beat_analysis + `agents/extract_storyboard` + `agents/shot_director`(经由 `workflows/episode_pipeline`) |
 | `novel_analysis` | 上面全部 + `skills/file_io.write_final_report` |
 
 ## 直接复用 agent
@@ -349,7 +363,7 @@ get_llm, set_llm, set_trace_dir = make_agent_llm_manager(
 - agent **不直接 import 别的 agent 的 logic**;但可以 `from agents.extract_Y.schema import ...` 复用类型契约。
 - agent 可以 `from skills.X import ...` 用确定性原语。
 - LLM 客户端 lazy build + 模块级缓存:首次 `get_llm()` 才读 `llm.json` 建客户端,之后命中缓存。
-- 把 agent 接到 workflow:在 `workflows/<flow>.py` 里 build 一个 LangGraph 节点,内部循环调 `extract_for_batch`(或 `storyboard_beat`),**不传 llm**。
+- 把 agent 接到 workflow:在 `workflows/<flow>.py` 里 build 一个 LangGraph 节点,内部循环调 `extract_for_batch`(或 `plan_episodes` / `narrate_episode` / `direct_episode`,或经 `episode_pipeline.build_episode_from_plan` 一次性走完整一集流水线),**不传 llm**。
 
 ## Cursor IDE 技能 vs 运行时技能(两个不同的层)
 

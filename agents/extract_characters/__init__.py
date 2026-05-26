@@ -8,20 +8,27 @@ lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
 公开 API::
 
     from agents.extract_characters import (
-        extract_for_batch, merge_delta,
-        Character, CharacterDraft, CharacterRoster, CharacterExtraction,
+        extract_for_batch, merge_delta, CharacterExtractResult,
         get_llm, set_llm, set_trace_dir,
     )
+    from schemas import Character, CharacterDraft, CharacterList, CharacterExtraction
 
     set_trace_dir(out_dir)                                 # runner 顶层调一次
-    delta = extract_for_batch(batch, known_dict, title="斗破苍穹")
-    # delta 已 in-place 合并入 known_dict;通常无需读 delta
+    result = extract_for_batch(batch, known_dict, title="斗破苍穹")
+    # known_dict 已就地更新;result.delta 给 trace / debug 看;
+    # result.renames 是本批 name 升格事件,caller 应回扫已锁住的 beats:
+    #   from agents.extract_beats import apply_character_renames
+    #   apply_character_renames(beats_so_far, result.renames)
+
+**schema 不在本模块 re-export**:所有 Pydantic 数据契约集中在顶层 ``schemas/``
+包,业务代码请直接 ``from schemas import X``。
 
 测试 / notebook 想 mock LLM:``set_llm(fake_client)``,完事后 ``set_llm(None)``
 复位即可。
 """
 
 from agents.extract_characters.logic import (
+    CharacterExtractResult,
     SYSTEM_PROMPT,
     extract_for_batch,
     get_llm,
@@ -29,18 +36,9 @@ from agents.extract_characters.logic import (
     set_llm,
     set_trace_dir,
 )
-from agents.extract_characters.schema import (
-    Character,
-    CharacterDraft,
-    CharacterExtraction,
-    CharacterRoster,
-)
 
 __all__ = [
-    "Character",
-    "CharacterDraft",
-    "CharacterExtraction",
-    "CharacterRoster",
+    "CharacterExtractResult",
     "SYSTEM_PROMPT",
     "extract_for_batch",
     "merge_delta",

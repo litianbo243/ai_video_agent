@@ -21,10 +21,10 @@ DAG::
 
 公开 API:
 
-* ``run(config) -> (IngestResult, CharacterRoster, BeatList)``
+* ``run(config) -> (IngestResult, CharacterList, BeatList)``
     顶层。
-* ``run_with_batches(batches, *, title, target_duration_sec, context_window)
-   -> (CharacterRoster, BeatList)``
+* ``run_with_batches(batches, *, title, context_window, rewrite_window)
+   -> (CharacterList, BeatList)``
     纯计算批循环(analyze 节点用,也可在 notebook 直接调)。注意:character
     是这个循环顺手产出的,不能再像旧版那样从外部传入。
 * ``build_graph()`` / ``State``
@@ -45,12 +45,11 @@ from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, ingest_book
 from agents import extract_beats, extract_characters
 from agents.extract_beats import (
-    Beat,
-    BeatList,
     DEFAULT_CONTEXT_WINDOW,
     DEFAULT_REWRITE_WINDOW,
 )
-from agents.extract_characters import Character, CharacterRoster
+from schemas.beat import Beat, BeatList
+from schemas.character import Character, CharacterList
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +65,8 @@ class State(TypedDict, total=False):
     跟旧版相比:不再有 ``characters`` 作为「上游产物」输入,character 由本 workflow
     内部跟 beat 交错产出。父 workflow 调本子-workflow 时只需注入 ``ingest_result``。
 
-    ``target_duration_sec`` 用来对齐 beat 切粒度(短视频 → 单集紧凑,长视频 →
-    单集可承载更多剧情)。独立跑时从 ``config.target_episode_duration_sec`` 取;
-    父 workflow 调时直接注入。
+    本 sub-workflow **不关心目标视频时长**(beat 只按戏剧浓度切自然边界,集层
+    聚合由下游 ``episode_planner`` 负责),所以没有 ``target_duration_sec``。
 
     ``context_window`` 控制 beat agent 在 prompt 里展示的「此前最近 N 段」窗口大小,
     独立跑时从 ``config.recent_beats_window`` 取;父 workflow 调时直接注入。
@@ -77,15 +75,12 @@ class State(TypedDict, total=False):
     从 ``config.rewrite_window`` 取。
     """
 
-    # 启动注入(独立跑给 config / 父调给 ingest_result + 选填 target/window)
     config: RunConfig
     ingest_result: IngestResult
-    target_duration_sec: int
     context_window: int
     rewrite_window: int
 
-    # 输出
-    characters: CharacterRoster
+    characters: CharacterList
     beats: BeatList
 
 
@@ -98,10 +93,9 @@ def run_with_batches(
     batches: Iterable[Batch],
     *,
     title: str = "",
-    target_duration_sec: int = 180,
     context_window: int = DEFAULT_CONTEXT_WINDOW,
     rewrite_window: int = DEFAULT_REWRITE_WINDOW,
-) -> Tuple[CharacterRoster, BeatList]:
+) -> Tuple[CharacterList, BeatList]:
     """跑完所有 batch,顺带产出人物表 + 剧情段列表(config-free 纯计算)。
 
     **节拍**(每 batch):
@@ -116,8 +110,8 @@ def run_with_batches(
 
     logger.info("=" * 60)
     logger.info(
-        "[beat_analysis] 启动:共 %d 批,目标每集 %d 秒,近段窗口 %d,rewrite K=%d",
-        len(batches), target_duration_sec, context_window, rewrite_window,
+        "[beat_analysis] 启动:共 %d 批,近段窗口 %d,rewrite K=%d",
+        len(batches), context_window, rewrite_window,
     )
     logger.info("=" * 60)
 
@@ -125,13 +119,14 @@ def run_with_batches(
     for i, batch in enumerate(batches, start=1):
         t0 = time.perf_counter()
 
-        extract_characters.extract_for_batch(
+        ch_result = extract_characters.extract_for_batch(
             batch, known_chars, title=title,
         )
+        if ch_result.renames:
+            extract_beats.apply_character_renames(beats_so_far, ch_result.renames)
         extract_beats.extract_for_batch(
             batch, beats_so_far, known_chars,
             title=title,
-            target_duration_sec=target_duration_sec,
             context_window=context_window,
             rewrite_window=rewrite_window,
         )
@@ -152,7 +147,7 @@ def run_with_batches(
     )
 
     return (
-        CharacterRoster(characters=list(known_chars.values())),
+        CharacterList(characters=list(known_chars.values())),
         BeatList(beats=beats_so_far),
     )
 
@@ -163,7 +158,7 @@ def run_with_batches(
 
 
 def _node_ingest(state: State) -> State:
-    """ingest 顺手把 target_duration_sec / context_window 也从 config 里拎出来
+    """ingest 顺手把 context_window / rewrite_window 也从 config 里拎出来
     (只有独立跑会进此分支;父 workflow 调时这俩通常已注入)。"""
     out: State = {}
     if "ingest_result" not in state:
@@ -178,8 +173,6 @@ def _node_ingest(state: State) -> State:
             max_total_chars=config.max_total_chars,
         )
         out["ingest_result"] = ing
-    if "target_duration_sec" not in state and "config" in state:
-        out["target_duration_sec"] = state["config"].target_episode_duration_sec
     if "context_window" not in state and "config" in state:
         out["context_window"] = state["config"].recent_beats_window
     if "rewrite_window" not in state and "config" in state:
@@ -192,7 +185,6 @@ def _node_analyze(state: State) -> State:
     characters, beats = run_with_batches(
         ing.batches,
         title=ing.title,
-        target_duration_sec=state.get("target_duration_sec", 180),
         context_window=state.get("context_window", DEFAULT_CONTEXT_WINDOW),
         rewrite_window=state.get("rewrite_window", DEFAULT_REWRITE_WINDOW),
     )
@@ -220,7 +212,7 @@ def build_graph():
 
 def run(
     config: RunConfig,
-) -> Tuple[IngestResult, CharacterRoster, BeatList]:
+) -> Tuple[IngestResult, CharacterList, BeatList]:
     """从 ``RunConfig`` 出发跑完整 beat workflow,顺带把 character 也跑出来。"""
     graph = build_graph()
     final: State = graph.invoke({"config": config})

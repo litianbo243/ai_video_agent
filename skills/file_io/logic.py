@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agents.extract_beats.schema import Beat
-from agents.extract_characters.schema import CharacterRoster
-from agents.extract_storyboard.schema import Episode
-from skills.file_io.schema import FinalReport
+from schemas.beat import Beat
+from schemas.character import CharacterList
+from schemas.report import FinalReport
+from schemas.storyboard import Episode
 
 
 def read_text_file(path: Path) -> str:
@@ -107,19 +107,23 @@ def _render_episode_md(ep: Episode) -> list:
         out.append(f"**剧情概要**: {ep.synopsis}")
     if ep.director_intent:
         out.append("")
-        out.append(f"**导演意图**: {ep.director_intent}")
+        out.append(f"**叙事调性**: {ep.director_intent}")
+    if ep.visual_style:
+        out.append("")
+        out.append(f"**视觉调性**: {ep.visual_style}")
     if ep.storyboards:
         out.append("")
-        out.append("| # | 镜头 | 意图 | 时长 | 出场 | 场景 | 画面 |")
-        out.append("|---|------|------|------|------|------|------|")
+        out.append("| # | 镜头 | 意图 | 剧情 | 时长 | 出场 | 场景 | 画面 |")
+        out.append("|---|------|------|------|------|------|------|------|")
         for sb in ep.storyboards:
             chars = ", ".join(sb.characters) if sb.characters else "-"
             setting = sb.setting or "-"
             desc = sb.description.replace("|", "\\|").replace("\n", " ")
             shot = sb.shot_type or "-"
             intent = (sb.intent or "-").replace("|", "\\|").replace("\n", " ")
+            narr = (sb.narrative_description or "-").replace("|", "\\|").replace("\n", " ")
             out.append(
-                f"| {sb.index} | {shot} | {intent} | {sb.duration_sec:.0f}s | {chars} | {setting} | {desc} |"
+                f"| {sb.index} | {shot} | {intent} | {narr} | {sb.duration_sec:.0f}s | {chars} | {setting} | {desc} |"
             )
         if any(sb.shot_action or sb.camera_motion for sb in ep.storyboards):
             out.append("")
@@ -165,7 +169,7 @@ def _render_beats_md(beats: list[Beat]) -> str:
     return "\n".join(parts).rstrip() + "\n"
 
 
-def _render_characters_md(roster: CharacterRoster) -> str:
+def _render_characters_md(roster: CharacterList) -> str:
     parts: list = ["# 人物档案\n"]
     if not roster.characters:
         return parts[0] + "\n_(无人物条目)_\n"
@@ -186,8 +190,13 @@ def _render_characters_md(roster: CharacterRoster) -> str:
             parts.append(ch.background)
         if ch.personality:
             parts.append("")
-            parts.append("**性格**")
+            parts.append("**性格(默认态)**")
             parts.append("")
             parts.append(ch.personality)
+        if ch.arc:
+            parts.append("")
+            parts.append("**弧光(剧情演变,带事件锚点)**")
+            parts.append("")
+            parts.append(ch.arc)
         parts.append("")
     return "\n".join(parts).rstrip() + "\n"

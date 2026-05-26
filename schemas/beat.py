@@ -1,15 +1,9 @@
-"""extract_beats agent 的数据契约。
+"""剧情段相关数据契约(``extract_beats`` agent 产出 + workflow 聚合)。
 
 * ``BeatDraft``      —— LLM 产出的初稿(无 ``index`` / ``related_batches``)
 * ``Beat``           —— 合并后完整段(含 ``index`` / ``related_batches``)
-* ``BeatList``       —— 一次 run 的全部剧情段
+* ``BeatList``       —— 一次 run 的全部剧情段(落盘格式)
 * ``BeatExtraction`` —— 单次 LLM 调用的输出包装
-
-**写 schema 注意**:class docstring 和 field description 都会经
-``model_json_schema()`` 塞进 LLM 的 system prompt,所以只写"是什么 + 怎么填 +
-微例",**不放** ``logic.py:xxx`` / "workflow 内部" 这类 LLM 看不懂的内部引用,
-也**不复述**决策规则(权威源在 ``logic.py:SYSTEM_PROMPT_TEMPLATE``)。维护指引
-只放本模块 docstring —— Pydantic 不抓模块级 docstring。
 """
 
 from __future__ import annotations

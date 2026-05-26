@@ -6,5 +6,7 @@
   "max_total_chars": 60000,
 
   "target_episode_duration_sec": 300,
-  "recent_beats_window": 5
+  "recent_beats_window": 5,
+  "rewrite_window": 1,
+  "storyboard_prev_tail_window": 3
 }

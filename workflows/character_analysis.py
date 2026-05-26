@@ -2,12 +2,12 @@
 
 公开 API:
 
-* ``run(config) -> (IngestResult, CharacterRoster)``
+* ``run(config) -> (IngestResult, CharacterList)``
     顶层,runner 用。编译并执行 graph(自带 ingest 节点)。
     LLM 由 character agent 自治(``agents/extract_characters/llm.json``),
     workflow 不再 build / 传递 LLM。
 
-* ``run_with_batches(batches, *, title="") -> CharacterRoster``
+* ``run_with_batches(batches, *, title="") -> CharacterList``
     纯计算批循环(config-free)。workflow 的 analyze 节点直接调它,也可在
     notebook / 测试里手工备好 batches 直接调,不走 LangGraph。
 
@@ -32,11 +32,8 @@ from typing import Dict, Iterable, Tuple, TypedDict
 from configs import RunConfig
 from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, ingest_book
-from agents.extract_characters import (
-    Character,
-    CharacterRoster,
-    extract_for_batch,
-)
+from agents.extract_characters import extract_for_batch
+from schemas.character import Character, CharacterList
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +54,7 @@ class State(TypedDict, total=False):
     ingest_result: IngestResult
 
     # 输出
-    roster: CharacterRoster
+    roster: CharacterList
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +67,7 @@ def run_with_batches(
     batches: Iterable[Batch],
     *,
     title: str = "",
-) -> CharacterRoster:
+) -> CharacterList:
     """跑完所有 batch,返回合并后的人物表(config-free 纯计算)。"""
     batches = list(batches)
     known: Dict[str, Character] = {}
@@ -95,7 +92,7 @@ def run_with_batches(
         len(known), total_elapsed, total_elapsed / 60,
     )
 
-    return CharacterRoster(characters=list(known.values()))
+    return CharacterList(characters=list(known.values()))
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +146,7 @@ def build_graph():
     return g.compile()
 
 
-def run(config: RunConfig) -> Tuple[IngestResult, CharacterRoster]:
+def run(config: RunConfig) -> Tuple[IngestResult, CharacterList]:
     """从 ``RunConfig`` 出发跑完整 character workflow。"""
     graph = build_graph()
     final: State = graph.invoke({"config": config})

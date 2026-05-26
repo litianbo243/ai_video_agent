@@ -1,6 +1,8 @@
-"""跑 workflow:character / beat / storyboard / novel_analysis 四选一。
+"""跑 workflow:character / beat / episode_planner / storyboard / novel_analysis 五选一。
 
 在 ``__main__`` 里改最后一行选要跑哪个 workflow。
+``run_episode_planner`` 跑到分集规划就停(不进分镜),适合单独调 planner 的 prompt /
+切集质量,免去 storyboard / shot_director 的时间与 token 成本。
 
 **注:** 本工程已不再维护独立的场景视觉档案。Beat agent 自己产出场景 name 作为
 字符串 label,storyboard agent 在写每镜 ``description`` 时把视觉环境直接写进画面。
@@ -13,6 +15,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from agents import episode_planner
 from configs import RunConfig, load_config
 from workflows import (
     beat_analysis,
@@ -53,7 +56,7 @@ def _format_agent_llms() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 4 个 workflow runner
+# 5 个 workflow runner
 # ---------------------------------------------------------------------------
 
 
@@ -113,6 +116,57 @@ def run_beat_analysis(config_path: Path) -> None:
     print("产物文件:")
     for kind, path in out_paths.items():
         print(f"  - {kind:>10}  {path}")
+    print("=" * 60)
+
+
+def run_episode_planner(config_path: Path) -> None:
+    """跑到 beat_analysis 后接 episode_planner:产人物 + 剧情段 + 分集规划(不进分镜)。
+
+    适合调 planner 的 prompt / 切集质量,免去 storyboard / shot_director 的耗时与花费。
+    """
+    config = load_config(config_path)
+    _setup_logging()
+    out_dir = _ts_outdir(config)
+
+    ing, roster, beats = beat_analysis.run(config)
+
+    known_chars = {ch.name: ch for ch in roster.characters}
+    plan_list = episode_planner.plan_episodes(
+        beats.beats, known_chars,
+        target_duration_sec=config.target_episode_duration_sec,
+        title=ing.title,
+    )
+
+    out_paths = {
+        "characters":    out_dir / "characters.json",
+        "beats":         out_dir / "beats.json",
+        "episode_plans": out_dir / "episode_plans.json",
+    }
+    out_paths["characters"].write_text(
+        roster.model_dump_json(indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    out_paths["beats"].write_text(
+        beats.model_dump_json(indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    out_paths["episode_plans"].write_text(
+        plan_list.model_dump_json(indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    total_indices = sum(len(p.beat_indices) for p in plan_list.plans)
+    avg_per_ep = total_indices / max(len(plan_list.plans), 1)
+    print()
+    print("=" * 60)
+    print(f"完成。输出目录:{out_dir}")
+    print(f"  书名:    {ing.title or '(无)'}")
+    print(f"  字数:    {ing.total_chars}(原文 {ing.raw_chars})")
+    print(f"  批次数:  {len(ing.batches)}")
+    print(f"  LLM:     {_format_agent_llms()}")
+    print(f"  人物表:   {len(roster.characters)} 位")
+    print(f"  剧情段:   {len(beats.beats)} 段")
+    print(f"  分集:     {len(plan_list.plans)} 集(平均 {avg_per_ep:.1f} beat/集,目标 {config.target_episode_duration_sec}s)")
+    print("产物文件:")
+    for kind, path in out_paths.items():
+        print(f"  - {kind:>13}  {path}")
     print("=" * 60)
 
 
@@ -197,4 +251,5 @@ if __name__ == "__main__":
     # run_novel_analysis(config_path)
     # run_character_analysis(config_path)
     # run_beat_analysis(config_path)
+    # run_episode_planner(config_path)
     run_storyboard_analysis(config_path)

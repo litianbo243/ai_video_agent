@@ -27,24 +27,46 @@ DAG::
                                                        ▼
                                                       END
 
-**为什么 interleaved**:character / beat / storyboard 三阶段过去是串行跑完整本书
-(先抽完所有人物 → 再切完所有 beats → 再逐 beat 出分镜)。这种做法有副作用:
-beat / storyboard 看到的 character 是「读完整本书的剧透态」,弧光 X→Y 被提前
-透露,LLM 反而难写出渐进的人物动机。改成逐 batch 内交错跑后,beat / storyboard
-看到的 character 是「读到当前 batch 末尾的最新态」,跟人类阅读的体感一致。
+**为什么 interleaved**(character + beat 阶段):character / beat 过去是串行
+跑完整本书,beat 看到的 character 是「读完整本书的剧透态」,弧光 X→Y 被提前
+透露。改成逐 batch 内交错跑后,beat 看到的 character 是「读到当前 batch 末尾
+的最新态」,跟人类阅读的体感一致。
 
-**节奏**(每个 batch 内,见 ``_node_interleaved_analysis``)::
+**为什么 plan-then-storyboard**:1 段 beat 通常只够 60-120 秒视频体量,而短剧
+目标每集 ~300 秒;直接 1 beat = 1 集会导致镜数严重不达标。引入
+``episode_planner`` 把 N 段 beat 聚合成 M 集,然后逐集分镜。代价是 character
+在分镜阶段看到的是「终态」(不再渐进),换取分集粒度合理 + 集层叙事连贯。
 
-    extract_characters.extract_for_batch     → 更新 known_chars
-    extract_beats.extract_for_batch          → 更新 beats_so_far
-                                              (本批可重写末尾 K 段 = rewrite_window)
-    for b in beats_so_far[:-K] if not storyboarded:
-        storyboard_beat(b, known_chars, ...) → +1 集
+**为什么拆 storyboard 为两个 agent**:一次 LLM 调用既出叙事又出视觉指导职责
+太重导致两边都不深入。现在拆成「叙事分镜师」(``extract_storyboard.narrate_episode``)
++「镜头导演」(``shot_director.direct_episode``),前者只关心讲什么,后者拿到
+锁定的叙事后专心做视觉决策。代价是每集 2 次 LLM 调用,换来两个 prompt 都更专注,
+产出质量更可控。
 
-**跨批续写**:beat agent 每批必须复述/修订「末尾 K 段」(``rewrite_window``,默认 1),
-LLM 想接着写就重写 summary,想啥都不改就原样照抄。merge 端用前 K 项 in-place 改写
-``beats_so_far`` 末尾 K 段(index 沿用,related_batches 追加本批),其后追加新段。
-末尾 K 段属于 LLM 可改窗口,storyboard 暂不触发(冷却期);全书结束后一次性 flush。
+**节奏**(见 ``_node_interleaved_analysis``)::
+
+    # 阶段 1:逐 batch 跑 character + beat(渐进态)
+    for batch in batches:
+        extract_characters.extract_for_batch  → 更新 known_chars
+        extract_beats.extract_for_batch       → 更新 beats_so_far
+                                                (本批可重写末尾 K 段)
+    # 阶段 2:全书 beat 抽完后一次性 plan(终态)
+    episode_planner.plan_episodes(beats_so_far, ...) → plan_list
+    # 阶段 3:按 plan 顺序串行分镜
+    for plan in plan_list.plans:
+        build_episode_from_plan(plan, ...)    → 叙事 + 视觉 + 合并 → +1 集
+
+**一集 = 两个 agent**:``extract_storyboard.narrate_episode`` 出叙事分镜
+(谁 / 在哪 / 说什么 / 想什么 + 集层 director_intent),``shot_director.direct_episode``
+出视觉指导(景别 / 运镜 / 起始画面 / 时长 + 集层 visual_style),
+``extract_storyboard.merge_episode`` 按 index 合并成 ``Episode``。
+封装在 ``workflows.episode_pipeline.build_episode_from_plan``。
+
+**跨批续写**(beat 阶段):beat agent 每批必须复述/修订「末尾 K 段」
+(``rewrite_window``,默认 1),LLM 想接着写就重写 summary,想啥都不改就原样
+照抄。merge 端用前 K 项 in-place 改写 ``beats_so_far`` 末尾 K 段(index 沿用,
+related_batches 追加本批),其后追加新段。**不再有 storyboard 的冷却期**
+(plan 是全书一次性,自然不存在冷却问题)。
 
 **子 workflow 的角色变化**:``character_analysis`` / ``beat_analysis`` /
 ``storyboard_analysis`` 三个子-workflow **仍保留**,但 novel_analysis 不再
@@ -64,22 +86,25 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set, TypedDict
+from typing import Dict, List, TypedDict
 
 from configs import RunConfig
 from skills.batch_chapters import Batch
 from skills.book_ingest import IngestResult, load_and_batch_txt
 from skills.epub_to_txt import epub_to_txt
-from agents import extract_beats, extract_characters, extract_storyboard
-from agents.extract_beats import Beat, BeatList
-from agents.extract_characters import Character, CharacterRoster
-from agents.extract_storyboard import (
-    Episode,
-    ScreenplayAnalysis,
-    Storyboard,
-    storyboard_beat,
+from agents import (
+    episode_planner,
+    extract_beats,
+    extract_characters,
+    extract_storyboard,
+    shot_director,
 )
-from skills.file_io import AgentLLMInfo, FinalReport, ReportMeta, write_final_report
+from schemas.beat import Beat, BeatList
+from schemas.character import Character, CharacterList
+from schemas.report import AgentLLMInfo, FinalReport, ReportMeta
+from schemas.storyboard import Episode, ScreenplayAnalysis, Storyboard
+from skills.file_io import write_final_report
+from workflows.episode_pipeline import build_episode_from_plan
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +117,9 @@ logger = logging.getLogger(__name__)
 AGENT_LLM_MODULES = {
     "extract_characters": extract_characters,
     "extract_beats":      extract_beats,
+    "episode_planner":    episode_planner,
     "extract_storyboard": extract_storyboard,
+    "shot_director":      shot_director,
 }
 
 
@@ -149,7 +176,7 @@ class WorkflowState(TypedDict, total=False):
     ingest_result: IngestResult
 
     # --- 各子-workflow 输出 ---
-    characters: CharacterRoster
+    characters: CharacterList
     beats: BeatList
     screenplay: ScreenplayAnalysis
 
@@ -209,23 +236,20 @@ def _node_ingest_and_batch(state: WorkflowState) -> WorkflowState:
 
 
 def _node_interleaved_analysis(state: WorkflowState) -> WorkflowState:
-    """逐 batch 交错跑 character → beat → 离开"复述区"的 beats 立即 storyboard。
+    """两阶段:逐 batch 跑 character + beat(渐进态)→ 全书 plan + 串行分镜(终态)。
 
-    模拟「读书」过程:character / beat 是渐进态,storyboard 看到的 character
-    是该 beat 离开 LLM 修订窗口那一刻的最新状态(而不是读完整本书后的剧透态)。
+    **阶段 1**(每 batch):
+        extract_characters.extract_for_batch  → 更新 ``known_chars``(渐进)
+        extract_beats.extract_for_batch       → 更新 ``beats_so_far``(可重写末尾 K 段)
 
-    **节拍**(每 batch):
+    **阶段 2**(全书 beat 抽完后,一次性):
+        episode_planner.plan_episodes(beats_so_far, known_chars, ...) → plan_list
+        for ep_index, plan in enumerate(plan_list.plans, start=1):
+            build_episode_from_plan(plan, member_beats, ...) → +1 集
 
-    1) ``extract_characters.extract_for_batch``  → 更新 ``known_chars``
-    2) ``extract_beats.extract_for_batch``       → 更新 ``beats_so_far``;
-       本批 LLM 可以重写 ``beats_so_far`` 末尾 ``rewrite_window`` 段
-    3) 扫 ``beats_so_far[:-rewrite_window]``,尚未 storyboard 的 → 立刻 ``storyboard_beat``
-
-    **storyboard 冷却期**:末尾 ``rewrite_window`` 段还在 LLM 可改窗口内,不立即
-    送 storyboard;等下一批不再回看时(或全书结束)再送。
-
-    **尾部 flush**:全部 batch 跑完后,把仍在冷却期里的末尾 ``rewrite_window``
-    段一次性补 storyboard(那时再无下批,不会被改了)。
+    阶段 2 的 ``known_chars`` 是终态(全书读完);这是 episode_planner 设计的天然
+    要求(全局视角才能正确分集)。trade-off:character 弧光在分镜阶段是"剧透态",
+    不再是渐进态。
     """
     ing = state["ingest_result"]
     target = state["target_episode_duration_sec"]
@@ -235,17 +259,15 @@ def _node_interleaved_analysis(state: WorkflowState) -> WorkflowState:
 
     known_chars: Dict[str, Character] = {}
     beats_so_far: List[Beat] = []
-    storyboarded_idx: Set[int] = set()
-    episodes: List[Episode] = []
-    prev_tail: List[Storyboard] = []  # 上集末尾 K 镜,给下集做画面承接
 
     batches = list(ing.batches)
     batch_lookup: Dict[int, Batch] = {b.index: b for b in batches}
 
     logger.info("=" * 60)
     logger.info(
-        "[interleaved] 启动:共 %d 批,目标每集 %d 秒,近段窗口 %d,rewrite K=%d",
-        len(batches), target, window, rewrite_window,
+        "[interleaved] 阶段 1(逐 batch 抽 character + beat):共 %d 批,"
+        "近段窗口 %d,rewrite K=%d",
+        len(batches), window, rewrite_window,
     )
     logger.info("=" * 60)
 
@@ -253,58 +275,86 @@ def _node_interleaved_analysis(state: WorkflowState) -> WorkflowState:
     for i, batch in enumerate(batches, start=1):
         t_batch = time.perf_counter()
 
-        extract_characters.extract_for_batch(
+        ch_result = extract_characters.extract_for_batch(
             batch, known_chars, title=ing.title,
         )
+        if ch_result.renames:
+            extract_beats.apply_character_renames(beats_so_far, ch_result.renames)
         extract_beats.extract_for_batch(
             batch, beats_so_far, known_chars,
             title=ing.title,
-            target_duration_sec=target,
             context_window=window,
             rewrite_window=rewrite_window,
         )
 
-        # 末尾 K 段还在 LLM 可改窗口里,先不送 storyboard
-        safe_until = len(beats_so_far) - rewrite_window
-        new_eps = 0
-        for bi, b in enumerate(beats_so_far[:safe_until]):
-            if b.index not in storyboarded_idx:
-                prev_b = beats_so_far[bi - 1] if bi > 0 else None
-                next_b = beats_so_far[bi + 1] if bi + 1 < len(beats_so_far) else None
-                ep = storyboard_beat(
-                    b, known_chars, batch_lookup,
-                    prev_beat=prev_b, next_beat=next_b,
-                    prev_tail_storyboards=prev_tail,
-                    target_duration_sec=target,
-                )
-                episodes.append(ep)
-                storyboarded_idx.add(b.index)
-                new_eps += 1
-                prev_tail = ep.storyboards[-prev_tail_window:] if (ep.storyboards and prev_tail_window > 0) else []
-
         elapsed = time.perf_counter() - t_batch
         logger.info(
             "[interleaved] %d/%d (batch=%d) 完成,%.1f 秒。"
-            "累计 %d 人 / %d 段(冷却中 %d 段 → +%d 集,共 %d 集)",
+            "累计 %d 人 / %d 段",
             i, len(batches), batch.index, elapsed,
             len(known_chars), len(beats_so_far),
-            len(beats_so_far) - safe_until, new_eps, len(episodes),
         )
 
-    # 全书结束:冷却期里剩下的 K 段一次 flush
-    for bi, b in enumerate(beats_so_far):
-        if b.index not in storyboarded_idx:
-            prev_b = beats_so_far[bi - 1] if bi > 0 else None
-            next_b = beats_so_far[bi + 1] if bi + 1 < len(beats_so_far) else None
-            ep = storyboard_beat(
-                b, known_chars, batch_lookup,
-                prev_beat=prev_b, next_beat=next_b,
-                prev_tail_storyboards=prev_tail,
-                target_duration_sec=target,
+    # 阶段 2:全书 beat 抽完后,plan + 串行分镜
+    logger.info("=" * 60)
+    logger.info(
+        "[interleaved] 阶段 2(全书 plan + 串行分镜):%d 段 beat → 待规划",
+        len(beats_so_far),
+    )
+    logger.info("=" * 60)
+
+    plan_list = episode_planner.plan_episodes(
+        beats_so_far, known_chars,
+        target_duration_sec=target,
+        title=ing.title,
+    )
+
+    beat_by_idx: Dict[int, Beat] = {b.index: b for b in beats_so_far}
+    episodes: List[Episode] = []
+    prev_tail: List[Storyboard] = []  # 上集末尾 K 镜,给下集做画面承接
+
+    for ep_index, plan in enumerate(plan_list.plans, start=1):
+        t_ep = time.perf_counter()
+        member_beats = [beat_by_idx[i] for i in plan.beat_indices if i in beat_by_idx]
+        missing = [i for i in plan.beat_indices if i not in beat_by_idx]
+        if missing:
+            logger.warning(
+                "[interleaved] 集 %d (%s) 的 beat_indices 含未知 index=%s,已跳过",
+                ep_index, plan.title, missing,
             )
-            episodes.append(ep)
-            storyboarded_idx.add(b.index)
-            prev_tail = ep.storyboards[-prev_tail_window:] if (ep.storyboards and prev_tail_window > 0) else []
+        if not member_beats:
+            logger.warning(
+                "[interleaved] 集 %d (%s) 无有效 member_beats,跳过",
+                ep_index, plan.title,
+            )
+            continue
+
+        prev_plan = plan_list.plans[ep_index - 2] if ep_index > 1 else None
+        next_plan = plan_list.plans[ep_index] if ep_index < len(plan_list.plans) else None
+
+        ep = build_episode_from_plan(
+            ep_index=ep_index,
+            plan=plan,
+            member_beats=member_beats,
+            known_chars=known_chars,
+            batch_lookup=batch_lookup,
+            prev_plan=prev_plan,
+            next_plan=next_plan,
+            prev_tail=prev_tail,
+            target_duration_sec=target,
+        )
+        episodes.append(ep)
+        prev_tail = (
+            ep.storyboards[-prev_tail_window:]
+            if (ep.storyboards and prev_tail_window > 0)
+            else []
+        )
+
+        elapsed = time.perf_counter() - t_ep
+        logger.info(
+            "[interleaved] 集 %d/%d (%s) 完成,%.1f 秒,%d 镜",
+            ep_index, len(plan_list.plans), plan.title, elapsed, len(ep.storyboards),
+        )
 
     total_elapsed = time.perf_counter() - t_total
     logger.info(
@@ -314,7 +364,7 @@ def _node_interleaved_analysis(state: WorkflowState) -> WorkflowState:
     )
 
     return {
-        "characters": CharacterRoster(characters=list(known_chars.values())),
+        "characters": CharacterList(characters=list(known_chars.values())),
         "beats":      BeatList(beats=beats_so_far),
         "screenplay": ScreenplayAnalysis(episodes=episodes),
     }
