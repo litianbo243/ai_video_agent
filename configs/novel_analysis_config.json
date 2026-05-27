@@ -1,6 +1,7 @@
 {
-  "input": "inputs/淫荡少妇白洁系列v1.1.epub",
-  "output_dir": "outputs",
+  "input": "assets/淫荡少妇白洁系列v1.1.epub",
+  "output_dir": "assets",
+  "log_dir": "logs",
 
   "mode": "screenplay",
 

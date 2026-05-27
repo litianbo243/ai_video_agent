@@ -153,6 +153,9 @@ class WorkflowState(TypedDict, total=False):
     episode_plans: EpisodePlanList   # mode >= EPISODE
     screenplay: Screenplay           # mode >= SCREENPLAY
 
+    # --- write 控制 ---
+    report_dir: str                  # Markdown + meta 写入目录（通常是 logs/<timestamp>）
+
     # --- write 之后 ---
     final_report: FinalReport        # 只在 SCREENPLAY mode 填充
     output_paths: Dict[str, str]
@@ -440,6 +443,7 @@ def _node_write(state: WorkflowState) -> WorkflowState:
     mode = state["mode"]
     ing = state["ingest_result"]
     out_dir = Path(state["output_dir"])
+    report_dir = Path(state.get("report_dir", state["output_dir"]))
 
     # meta 在所有 mode 都生成(便于人类区分 run 时间 / 输入 / 用了哪些 LLM)
     meta = ReportMeta(
@@ -453,21 +457,37 @@ def _node_write(state: WorkflowState) -> WorkflowState:
         llm_per_agent=collect_agent_llm_info_for_mode(mode),
     )
 
-    logger.info("[write] 开始按 mode=%s 落盘 → %s", mode.value, out_dir)
+    logger.info("[write] 开始按 mode=%s 落盘", mode.value)
     t0 = time.perf_counter()
-    paths = write_partial(
+
+    # 1) 机器可读 JSON 写入 out_dir（assets 或普通时间戳目录）
+    json_paths = write_partial(
         out_dir,
+        characters=state.get("characters"),
+        beats=state.get("beats"),
+        episode_plans=state.get("episode_plans"),
+        screenplay=state.get("screenplay"),
+        meta=None,          # 不生成 MD
+    )
+
+    # 2) 人类可读 Markdown + meta 写入 report_dir（logs/<timestamp>）
+    report_paths = write_partial(
+        report_dir,
         characters=state.get("characters"),
         beats=state.get("beats"),
         episode_plans=state.get("episode_plans"),
         screenplay=state.get("screenplay"),
         meta=meta,
     )
+
+    # 合并路径（以 JSON 为主，MD 路径也记录）
+    paths = {**json_paths, **report_paths}
     paths["txt_path"] = str(ing.txt_path)
+
     elapsed = time.perf_counter() - t0
     logger.info(
-        "[write] 落盘完成,用时 %.1f 秒,共 %d 个文件",
-        elapsed, len(paths),
+        "[write] 落盘完成,用时 %.1f 秒,共 %d 个文件 (JSON → %s, MD → %s)",
+        elapsed, len(paths), out_dir, report_dir,
     )
 
     update: WorkflowState = {"output_paths": paths}
@@ -547,11 +567,24 @@ def run(config: RunConfig) -> RunResult:
     跑到哪一阶段由 ``config.mode`` 决定 —— 详见 ``RunMode``。
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_root = (Path(config.output_dir) / timestamp).resolve()
-    out_root.mkdir(parents=True, exist_ok=True)
-    logger.info("本次运行输出目录:%s", out_root)
 
-    setup_agent_traces(out_root)
+    # assets 目录特殊处理：直接写入，不创建时间戳子目录
+    out_path = Path(config.output_dir).resolve()
+    if out_path.name.lower() == "assets":
+        out_root = out_path
+        out_root.mkdir(parents=True, exist_ok=True)
+        logger.info("本次运行产物目录(assets 模式):%s", out_root)
+    else:
+        out_root = (out_path / timestamp).resolve()
+        out_root.mkdir(parents=True, exist_ok=True)
+        logger.info("本次运行产物目录:%s", out_root)
+
+    # 日志始终使用时间戳子目录（保留历史）
+    log_root = (Path(config.log_dir) / timestamp).resolve()
+    log_root.mkdir(parents=True, exist_ok=True)
+    logger.info("本次运行日志目录:%s", log_root)
+
+    setup_agent_traces(log_root)
     logger.info(
         "workflow 启动:mode=%s input=%s output=%s max_batch_chars=%d "
         "max_total_chars=%d episode=%ds window=%d rewrite_K=%d prev_tail_K=%d",
@@ -565,6 +598,7 @@ def run(config: RunConfig) -> RunResult:
     initial: WorkflowState = {
         "input_path": str(config.input),
         "output_dir": str(out_root),
+        "report_dir": str(log_root),
         "mode": config.mode,
         "max_batch_chars": config.max_batch_chars,
         "max_total_chars": config.max_total_chars,

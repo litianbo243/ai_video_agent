@@ -19,6 +19,10 @@ class GenerateCharacterPromptConfig(BaseModel):
 
     characters_path: str = Field(..., description="已产出的 characters.json 路径")
     output_dir: str = Field(..., description="提示词输出目录（通常与 characters.json 同目录）")
+    log_dir: str = Field(
+        default="logs",
+        description="运行日志根目录（当前 generate_character_prompt 不产生 LLM trace，预留）",
+    )
 
 
 def load_generate_character_prompt_config(path: str | Path) -> GenerateCharacterPromptConfig:
@@ -33,7 +37,8 @@ def load_generate_character_prompt_config(path: str | Path) -> GenerateCharacter
     print("=" * 60)
     print(f"配置已加载({path}):")
     print(f"  characters: {cfg.characters_path}")
-    print(f"  output:     {cfg.output_dir}")
+    print(f"  产物目录:   {cfg.output_dir}")
+    print(f"  日志目录:   {cfg.log_dir}")
     print("=" * 60)
 
     return cfg

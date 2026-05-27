@@ -1,4 +1,5 @@
 {
-  "characters_path": "outputs/20260527_205624/characters.json",
-  "output_dir": "outputs/20260527_205624"
+  "characters_path": "assets/characters.json",
+  "output_dir": "assets",
+  "log_dir": "logs"
 }

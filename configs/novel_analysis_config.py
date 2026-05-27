@@ -47,7 +47,11 @@ class RunConfig(BaseModel):
     """单次 run 的流水线编排参数。"""
 
     input: str = Field(..., description="源小说路径(.txt / .epub)")
-    output_dir: str = Field(..., description="输出根目录;每次 run 建时间戳子目录")
+    output_dir: str = Field(..., description="产物输出根目录;每次 run 建时间戳子目录")
+    log_dir: str = Field(
+        default="logs",
+        description="LLM trace 和运行日志根目录;每次 run 建时间戳子目录",
+    )
     mode: RunMode = Field(
         default=RunMode.SCREENPLAY,
         description=(
@@ -104,7 +108,8 @@ def load_config(path: str | Path) -> RunConfig:
     print("=" * 60)
     print(f"配置已加载({path}):")
     print(f"  输入:           {cfg.input}")
-    print(f"  输出:           {cfg.output_dir}")
+    print(f"  产物目录:       {cfg.output_dir}")
+    print(f"  日志目录:       {cfg.log_dir}")
     print(f"  运行模式:       {cfg.mode.value}"
           f"({_MODE_HINT[cfg.mode]})")
     print(f"  批字数:         ≤ {cfg.max_batch_chars}")
