@@ -1,25 +1,20 @@
 """跑 workflow 的统一入口。
 
-工作流只有一条:``workflows.novel_analysis``。跑到哪一阶段由
-``RunConfig.mode``(写在 JSON 配置文件里)决定:
+提供两个入口:
 
-* ``"character"``  —— 仅人物档案
-* ``"beat"``       —— + 剧情段
-* ``"episode"``    —— + 分集规划
-* ``"screenplay"`` —— + 逐集分镜(完整流水线,默认)
+* ``run_novel_analysis`` —— 跑 ``workflows.novel_analysis`` 主流水线
+  按 ``RunConfig.mode`` 早停(``character`` / ``beat`` / ``episode`` / ``screenplay``)
+
+* ``run_generate_character_prompt`` —— 跑 ``workflows.generate_character_prompt``
+  输入已产出的 ``characters.json``,生成 SDXL 图像提示词
 
 用法::
 
-    # 1. 编辑 configs/run_config.json 把 mode 改成你想跑的那档
-    # 2. python run_workflow.py
+    # 跑 novel_analysis:
+    #   python run_workflow.py novel_analysis
 
-调试 prompt 时用浅 mode 早停(快 + 省 token),需要完整剧本时切回 screenplay。
-4 档 mode 跑出的中间产物是**严格超集**关系,所以早停跟全跑的字符 / 剧情段
-完全一致。
-
-**注:** 本工程不再维护独立的场景视觉档案。``beat_segmenter`` 自己产出场景
-name 作为字符串 label,``shot_director`` 在写每镜 ``description`` 时把视觉
-环境直接写进画面。
+    # 跑 generate_character_prompt:
+    #   python run_workflow.py generate_character_prompt
 """
 
 from __future__ import annotations
@@ -27,8 +22,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from configs import RunMode, load_config
-from workflows import novel_analysis
+from configs import (
+    GenerateCharacterPromptConfig,
+    RunMode,
+    load_config,
+    load_generate_character_prompt_config,
+)
+from workflows import novel_analysis, generate_character_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -51,12 +51,12 @@ def _format_agent_llms(mode: RunMode) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 主入口
+# novel_analysis 入口
 # ---------------------------------------------------------------------------
 
 
-def main(config_path: Path) -> None:
-    """按 ``config.mode`` 跑工作流并打印摘要。"""
+def run_novel_analysis(config_path: Path) -> None:
+    """按 ``config.mode`` 跑 novel_analysis 工作流并打印摘要。"""
     config = load_config(config_path)
     _setup_logging()
 
@@ -96,9 +96,61 @@ def main(config_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 入口:改 configs/run_config.json 里的 mode 字段切换早停阶段
+# generate_character_prompt 入口
 # ---------------------------------------------------------------------------
 
 
+def run_generate_character_prompt(config_path: Path) -> None:
+    """按配置跑 generate_character_prompt workflow。"""
+    cfg: GenerateCharacterPromptConfig = load_generate_character_prompt_config(config_path)
+    _setup_logging()
+
+    print()
+    print("=" * 60)
+    print(f"generate_character_prompt 启动")
+    print(f"  characters: {cfg.characters_path}")
+    print(f"  output:     {cfg.output_dir}")
+    print("=" * 60)
+
+    result = generate_character_prompt.run(cfg.characters_path, cfg.output_dir)
+
+    print()
+    print("=" * 60)
+    print("完成。")
+    print(f"  人物提示词: {len(result.prompts.prompts)} 条")
+    print(f"  JSON:       {result.prompts_json_path}")
+    print(f"  MD:         {result.prompts_md_path}")
+    print("=" * 60)
+
+
+# ---------------------------------------------------------------------------
+# CLI 入口
+# ---------------------------------------------------------------------------
+
+
+def _print_usage() -> None:
+    print("用法:")
+    print("  python run_workflow.py novel_analysis             # 跑 novel_analysis")
+    print("  python run_workflow.py generate_character_prompt  # 跑 generate_character_prompt")
+    print()
+    print("配置文件:")
+    print("  configs/novel_analysis_config.json")
+    print("  configs/generate_character_prompt_config.json")
+
+
 if __name__ == "__main__":
-    main(Path("configs/run_config.json"))
+    import sys
+
+    if len(sys.argv) < 2:
+        _print_usage()
+        sys.exit(1)
+
+    cmd = sys.argv[1].lower()
+    if cmd in ("novel_analysis", "novel-analysis", "na"):
+        run_novel_analysis(Path("configs/novel_analysis_config.json"))
+    elif cmd in ("generate_character_prompt", "generate-character-prompt", "gcp"):
+        run_generate_character_prompt(Path("configs/generate_character_prompt_config.json"))
+    else:
+        print(f"未知命令: {cmd}")
+        _print_usage()
+        sys.exit(1)

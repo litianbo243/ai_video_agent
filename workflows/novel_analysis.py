@@ -1,6 +1,6 @@
 """novel_analysis 主流水线:**逐 batch 交错**跑三阶段,产出最终剧本结构。
 
-按 ``RunConfig.mode`` 早停,4 档由浅到深严格超集:
+按 ``RunConfig.mode`` 早停,由浅到深严格超集:
 
 * ``RunMode.CHARACTER``  —— 只跑人物档案
 * ``RunMode.BEAT``       —— + 剧情段切分(interleaved 与 character 同批)
@@ -471,7 +471,7 @@ def _node_write(state: WorkflowState) -> WorkflowState:
     )
 
     update: WorkflowState = {"output_paths": paths}
-    # 仅 SCREENPLAY mode 装得起完整 FinalReport(三件套齐全)
+    # mode >= SCREENPLAY 时三件套齐全,可装完整 FinalReport。
     if mode_includes(mode, RunMode.SCREENPLAY):
         update["final_report"] = FinalReport(
             screenplay=state["screenplay"],
@@ -537,7 +537,7 @@ class RunResult:
     beats: Optional[BeatList] = None
     episode_plans: Optional[EpisodePlanList] = None
     screenplay: Optional[Screenplay] = None
-    # 只在 SCREENPLAY mode 时有(三件套 + meta 齐全)
+    # mode >= SCREENPLAY 时有(三件套 + meta 齐全)
     final_report: Optional[FinalReport] = None
 
 

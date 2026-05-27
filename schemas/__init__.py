@@ -28,6 +28,7 @@ from schemas.character import (
     CharacterExtraction,
     CharacterList,
 )
+from schemas.character_prompt import CharacterImagePrompt, CharacterImagePromptList
 from schemas.episode_plan import EpisodePlan, EpisodePlanList
 from schemas.narrative_shot import NarrativeShot, NarrativeShotList
 from schemas.report import AgentLLMInfo, FinalReport, ReportMeta
@@ -44,6 +45,8 @@ __all__ = [
     "CharacterDraft",
     "CharacterExtraction",
     "CharacterList",
+    "CharacterImagePrompt",
+    "CharacterImagePromptList",
     "Episode",
     "EpisodePlan",
     "EpisodePlanList",

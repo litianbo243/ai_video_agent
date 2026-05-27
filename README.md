@@ -85,8 +85,8 @@ ai_video_agent/
 ├── workflows/                     # LangGraph DAG,组合 agent + skill
 │   └── novel_analysis.py          # 唯一流水线;mode 早停决定跑到哪一阶段
 ├── configs/
-│   ├── run_config.py              # RunConfig + RunMode(纯流水线参数;LLM 不在此)
-│   ├── run_config.json            # 示例 config(不含 llm 段——LLM 在 agent 目录)
+│   ├── novel_analysis_config.py   # RunConfig + RunMode(纯流水线参数;LLM 不在此)
+│   ├── novel_analysis_config.json # 示例 config(不含 llm 段——LLM 在 agent 目录)
 │   └── __init__.py                # load_config(...)
 ├── llm/
 │   ├── client.py                  # OpenAI 兼容客户端
@@ -112,7 +112,7 @@ cp .env.example .env  # 只用本地推理(ollama 等)时此步可跳过
 ## 运行(config-driven)
 
 ```bash
-# 1. 编辑 configs/run_config.json,填上 input / output_dir / mode 等流水线参数
+# 1. 编辑 configs/novel_analysis_config.json,填上 input / output_dir / mode 等流水线参数
 # 2. 编辑 agents/<agent_name>/llm.json,给每个 agent 选 LLM(可以选不同模型)
 # 3. 跑
 python run_workflow.py
@@ -134,7 +134,7 @@ python run_workflow.py
 分集规划)跟单独跑 `character` / `beat` / `episode` 时是同一份。所以调 prompt
 时先用浅 mode 早停快速看产物,确认 OK 再切 `screenplay` 跑完整流水线。
 
-### Pipeline config 结构(`configs/run_config.json`)
+### Pipeline config 结构(`configs/novel_analysis_config.json`)
 
 ```json
 {
@@ -164,7 +164,7 @@ python run_workflow.py
 | `rewrite_window` | beat agent 每批必须复述/修订的末尾 K 段(默认 1);K=0 关闭跨批续写(长戏剧段会被批边界切碎),K=1 推荐(LLM 自然接续),K>=2 给 LLM 更大修订空间但 token 成本随 K 增长。同时是分镜阶段的「冷却期」 |
 | `shot_prev_tail_window` | `shot_director` 每集开头看上集末 K 镜做画面承接(默认 3);K=0 关闭(集间无视觉承接),K=3 推荐,K>=5 给 LLM 更长视觉记忆但 token 成本随 K 增长 |
 
-Pydantic 模型 `RunConfig` 定义在 [`configs/run_config.py`](configs/run_config.py);
+Pydantic 模型 `RunConfig` 定义在 [`configs/novel_analysis_config.py`](configs/novel_analysis_config.py);
 LLM 客户端配置 `LLMConfig` 定义在 [`llm/llm_config.py`](llm/llm_config.py)(被各 agent 自治使用)。
 
 ### Per-agent LLM 配置(`agents/<agent_name>/llm.json`)
@@ -287,7 +287,7 @@ from configs import load_config, RunMode
 from workflows import novel_analysis
 
 # 改 JSON 里的 "mode" 即可,或者在代码里临时 override:
-config = load_config("configs/run_config.json")
+config = load_config("configs/novel_analysis_config.json")
 config.mode = RunMode.BEAT   # 临时 override 成只跑到 beat
 
 result = novel_analysis.run(config)
