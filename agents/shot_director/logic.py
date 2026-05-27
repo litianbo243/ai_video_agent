@@ -1,12 +1,12 @@
 """一集叙事分镜 → 一集视觉指导:一次 LLM 调用。
 
-接到上游 ``extract_storyboard`` 出的一集 ``NarrativeShot`` 列表(已含
+接到上游 ``narrative_director`` 出的一集 ``NarrativeShot`` 列表(已含
 intent / characters / setting / speaker / dialogue / voiceover + 集层
 ``director_intent``),本 agent 决定每镜的"怎么拍":景别 / 运镜 / 动作演变 /
 起始画面 / 时长。
 
 输出 ``ShotDirectionList``,workflow 按 ``index`` 与 ``NarrativeShot`` 配对
-合并成最终 ``Storyboard``。
+合并成最终 ``Shot``。
 
 LLM 配置在同目录 ``llm.json``,本模块顶部 lazy build。
 测试时想 mock:``from agents.shot_director import set_llm; set_llm(fake)``。
@@ -22,12 +22,12 @@ from llm.agent_llm import make_agent_llm_manager
 from schemas.character import Character
 from schemas.shot_direction import ShotDirection, ShotDirectionList
 
-# ``NarrativeShot`` / ``Storyboard`` 仅做类型注解(``from __future__ import
+# ``NarrativeShot`` / ``Shot`` 仅做类型注解(``from __future__ import
 # annotations`` 已开,运行期靠 duck typing 读字段),关进 TYPE_CHECKING
 # 不引入运行时多余 import。schema 中心化后已无循环依赖隐患。
 if TYPE_CHECKING:
-    from schemas.narrative import NarrativeShot
-    from schemas.storyboard import Storyboard
+    from schemas.narrative_shot import NarrativeShot
+    from schemas.screenplay import Shot
 
 logger = logging.getLogger(__name__)
 
@@ -157,10 +157,10 @@ def _render_narrative_shots(shots: List[NarrativeShot]) -> str:
     return "\n\n".join(parts)
 
 
-def _render_prev_tail_visual(prev_tail: List[Storyboard]) -> str:
+def _render_prev_tail_visual(prev_tail: List[Shot]) -> str:
     """紧凑渲染上集末尾 K 镜的**视觉维度**(景别 / 运镜 / 起始画面 / 动作)。
 
-    本 agent 只关心视觉承接,所以即使 prev_tail 是完整 Storyboard 也只挑视觉字段。
+    本 agent 只关心视觉承接,所以即使 prev_tail 是完整 Shot 也只挑视觉字段。
     """
     if not prev_tail:
         return "(首集,无上集视觉)"
@@ -180,7 +180,7 @@ def _build_user_prompt(
     director_intent: str,
     narrative_shots: List[NarrativeShot],
     chars: List[Character],
-    prev_tail: List[Storyboard],
+    prev_tail: List[Shot],
     target_duration_sec: int,
 ) -> str:
     return (
@@ -251,17 +251,17 @@ def direct_episode(
     director_intent: str,
     narrative_shots: List[NarrativeShot],
     characters: Dict[str, Character],
-    prev_tail_storyboards: List[Storyboard] | None = None,
+    prev_tail_shots: List[Shot] | None = None,
     target_duration_sec: int = 180,
 ) -> ShotDirectionList:
     """为一集叙事分镜出视觉指导(1 次 LLM 调用)。
 
     Args:
         episode_index: 本集编号(= 对应 Beat.index),仅用于日志 / warn。
-        director_intent: 集层叙事调性(extract_storyboard 已写入)。
+        director_intent: 集层叙事调性(narrative_director 已写入)。
         narrative_shots: 本集所有叙事分镜(已含 intent / characters / 等)。
         characters: 全局人物档案(取本集涉及人物的 appearance 用于视觉一致性)。
-        prev_tail_storyboards: 上集末尾几镜的完整 ``Storyboard``,本 agent 只
+        prev_tail_shots: 上集末尾几镜的完整 ``Shot``,本 agent 只
             读其中视觉字段做承接;首集传 ``None`` / ``[]``。
         target_duration_sec: 本集目标总时长(秒)。
 
@@ -281,7 +281,7 @@ def direct_episode(
                 seen_char.add(ref)
                 relevant_chars.append(characters[ref])
 
-    prev_tail = prev_tail_storyboards or []
+    prev_tail = prev_tail_shots or []
 
     llm = get_llm()
     system = _build_system_prompt(target_duration_sec)

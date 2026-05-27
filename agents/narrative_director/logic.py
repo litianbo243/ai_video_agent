@@ -7,11 +7,11 @@
 本 agent **只管叙事维度**(谁 / 在哪 / 说什么 / 想什么 + 集层 director_intent),
 镜头视觉决策(景别 / 运镜 / 起始画面 / 时长)归下游 ``shot_director`` agent。
 
-合并:``Storyboard`` = ``NarrativeShot``(本 agent) ∪ ``ShotDirection``
+合并:``Shot`` = ``NarrativeShot``(本 agent) ∪ ``ShotDirection``
 (下游 agent),由 workflow 调 ``merge_episode`` 按 index 配对。
 
 LLM 配置在同目录 ``llm.json``,本模块顶部直接 lazy build。
-测试时想 mock:``from agents.extract_storyboard import set_llm; set_llm(fake)``。
+测试时想 mock:``from agents.narrative_director import set_llm; set_llm(fake)``。
 """
 
 from __future__ import annotations
@@ -25,15 +25,15 @@ from skills.batch_chapters import Batch
 from schemas.beat import Beat
 from schemas.character import Character
 from schemas.episode_plan import EpisodePlan
-from schemas.narrative import NarrativeShot, NarrativeShotList
+from schemas.narrative_shot import NarrativeShot, NarrativeShotList
 from schemas.shot_direction import ShotDirection, ShotDirectionList
-from schemas.storyboard import Episode, Storyboard
+from schemas.screenplay import Episode, Shot
 
 logger = logging.getLogger(__name__)
 
 
 get_llm, set_llm, set_trace_dir = make_agent_llm_manager(
-    agent_name="extract_storyboard",
+    agent_name="narrative_director",
     config_path=Path(__file__).parent / "llm.json",
 )
 
@@ -316,15 +316,15 @@ def _render_plan_timeline(
     return "\n".join(lines)
 
 
-def _render_prev_tail_narrative(storyboards: List[Storyboard]) -> str:
+def _render_prev_tail_narrative(shots: List[Shot]) -> str:
     """紧凑渲染上集末尾 K 镜的**叙事维度**(谁在哪 / 说了什么 / 想了什么)。
 
     本 agent 只关心叙事承接,所以即使 prev_tail 里有视觉字段也不渲染。
     """
-    if not storyboards:
+    if not shots:
         return "(首集,无上集叙事)"
     lines: List[str] = []
-    for sb in storyboards:
+    for sb in shots:
         head = f"- 镜 {sb.index}"
         if sb.setting:
             head += f" @ {sb.setting}"
@@ -350,14 +350,14 @@ def _build_user_prompt(
     target_duration: int,
     prev_plan: EpisodePlan | None,
     next_plan: EpisodePlan | None,
-    prev_tail_storyboards: List[Storyboard],
+    prev_tail_shots: List[Shot],
 ) -> str:
     batch_indices = sorted({bi for b in member_beats for bi in b.related_batches})
     return (
         f"=== 上下文 · 集时间线 ===\n"
         f"{_render_plan_timeline(ep_index, plan, prev_plan, next_plan)}\n\n"
-        f"=== 上集末尾叙事(承接参考,共 {len(prev_tail_storyboards)} 镜)===\n"
-        f"{_render_prev_tail_narrative(prev_tail_storyboards)}\n\n"
+        f"=== 上集末尾叙事(承接参考,共 {len(prev_tail_shots)} 镜)===\n"
+        f"{_render_prev_tail_narrative(prev_tail_shots)}\n\n"
         f"=== 本集规划基线 ===\n{_render_plan(plan)}\n\n"
         f"=== 本集所含 {len(member_beats)} 段 Beat(按时序)===\n"
         f"{_render_member_beats(member_beats)}\n\n"
@@ -427,7 +427,7 @@ def narrate_episode(
     batches: Dict[int, Batch],
     prev_plan: EpisodePlan | None = None,
     next_plan: EpisodePlan | None = None,
-    prev_tail_storyboards: List[Storyboard] | None = None,
+    prev_tail_shots: List[Shot] | None = None,
     target_duration_sec: int = 180,
 ) -> NarrativeShotList:
     """把一集所含 N 段 Beat 展开为一集**叙事分镜**(不含视觉字段)。
@@ -439,7 +439,7 @@ def narrate_episode(
         characters: 全局人物档案(终态)。
         batches: 原文 batch 字典(用于回查所有 beat 的 related_batches,跨 batch 拼接)。
         prev_plan / next_plan: 相邻集 plan 摘要;首集 / 末集传 ``None``。
-        prev_tail_storyboards: 上集末尾几镜的完整 ``Storyboard`` 列表;
+        prev_tail_shots: 上集末尾几镜的完整 ``Shot`` 列表;
             本 agent 只读其中叙事字段。首集传 ``None`` / ``[]``。
         target_duration_sec: 单集目标时长(秒),用于节奏对齐。
 
@@ -453,7 +453,7 @@ def narrate_episode(
     chars_list, raw_text = _gather_inputs_for_episode(
         member_beats, characters, batches, ep_index=ep_index,
     )
-    prev_tail = prev_tail_storyboards or []
+    prev_tail = prev_tail_shots or []
 
     # 镜数典型区间:目标时长 / 8s ~ 目标时长 / 5s(单镜 5-8s 节奏)。
     # LLM 数学不稳,直接给具体上下限引导。
@@ -473,7 +473,7 @@ def narrate_episode(
         target_duration=target_duration_sec,
         prev_plan=prev_plan,
         next_plan=next_plan,
-        prev_tail_storyboards=prev_tail,
+        prev_tail_shots=prev_tail,
     )
 
     # 本集所含 setting refs 并集(保序去重)
@@ -531,11 +531,11 @@ def merge_episode(
       * ``title`` / ``synopsis`` / ``beat_indices`` ← ``plan``
       * ``director_intent`` ← ``narrative``(narrate 可能在 plan 基线上微调)
       * ``visual_style`` ← ``direction``
-      * ``storyboards`` ← 按 index 配对合并
+      * ``shots`` ← 按 index 配对合并
     """
     dir_by_idx: Dict[int, ShotDirection] = {d.index: d for d in direction.shots}
 
-    storyboards: List[Storyboard] = []
+    shots: List[Shot] = []
     for n in narrative.shots:
         d = dir_by_idx.get(n.index)
         if d is None:
@@ -544,8 +544,8 @@ def merge_episode(
                 ep_index, n.index,
             )
             d = ShotDirection(index=n.index, shot_type="中景")
-        storyboards.append(
-            Storyboard(
+        shots.append(
+            Shot(
                 index=n.index,
                 intent=n.intent,
                 narrative_description=n.description,
@@ -569,7 +569,7 @@ def merge_episode(
         beat_indices=list(plan.beat_indices),
         director_intent=narrative.director_intent,
         visual_style=direction.visual_style,
-        storyboards=storyboards,
+        shots=shots,
     )
 
 

@@ -3,17 +3,21 @@
 负责两件事:
 
 * 读取规范化后的源 ``.txt``;
-* 把最终报告同时落成 JSON(机器可读)和 Markdown(人类可读)。
+* 把流水线产物按需落成 JSON(机器可读)+ Markdown(人类可读)。
+
+``write_partial`` 是统一写盘入口:传哪些字段就落哪些文件,跨 mode 通用。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Dict, Optional
 
-from schemas.beat import Beat
+from schemas.beat import Beat, BeatList
 from schemas.character import CharacterList
-from schemas.report import FinalReport
-from schemas.storyboard import Episode
+from schemas.episode_plan import EpisodePlanList
+from schemas.report import FinalReport, ReportMeta
+from schemas.screenplay import Episode, Screenplay
 
 
 def read_text_file(path: Path) -> str:
@@ -24,33 +28,80 @@ def read_text_file(path: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def write_final_report(report: FinalReport, output_dir: Path) -> dict:
-    """把最终报告同时落成 JSON 与 Markdown。
+def write_partial(
+    output_dir: Path,
+    *,
+    characters: Optional[CharacterList] = None,
+    beats: Optional[BeatList] = None,
+    episode_plans: Optional[EpisodePlanList] = None,
+    screenplay: Optional[Screenplay] = None,
+    meta: Optional[ReportMeta] = None,
+) -> Dict[str, str]:
+    """把工作流产物落到 ``output_dir``,**有什么落什么**。
 
-    返回写入的 7 个路径:
-    ``{screenplay_json/md, characters_json/md, beats_json/md, meta_json}``。
+    每个字段非 ``None`` 时就落对应的 ``.json``(可渲染时同时落 ``.md``):
+
+    * ``characters``    → characters.json + characters.md
+    * ``beats``         → beats.json + beats.md
+    * ``episode_plans`` → episode_plans.json(无 .md)
+    * ``screenplay``    → screenplay.json(+ screenplay.md,需配合 ``meta``)
+    * ``meta``          → meta.json
+
+    返回 ``{kind: path_str}`` 映射。
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    paths: Dict[str, Path] = {}
 
-    paths = {
-        "screenplay_json":  out / "screenplay.json",
-        "screenplay_md":    out / "screenplay.md",
-        "characters_json":  out / "characters.json",
-        "characters_md":    out / "characters.md",
-        "beats_json":       out / "beats.json",
-        "beats_md":         out / "beats.md",
-        "meta_json":        out / "meta.json",
-    }
+    if characters is not None:
+        paths["characters_json"] = out / "characters.json"
+        paths["characters_json"].write_text(
+            characters.model_dump_json(indent=2), encoding="utf-8",
+        )
+        paths["characters_md"] = out / "characters.md"
+        paths["characters_md"].write_text(
+            _render_characters_md(characters), encoding="utf-8",
+        )
 
-    paths["screenplay_json"].write_text(report.screenplay.model_dump_json(indent=2), encoding="utf-8")
-    paths["characters_json"].write_text(report.characters.model_dump_json(indent=2), encoding="utf-8")
-    paths["beats_json"].write_text(report.beats.model_dump_json(indent=2), encoding="utf-8")
-    paths["meta_json"].write_text(report.meta.model_dump_json(indent=2), encoding="utf-8")
+    if beats is not None:
+        paths["beats_json"] = out / "beats.json"
+        paths["beats_json"].write_text(
+            beats.model_dump_json(indent=2), encoding="utf-8",
+        )
+        paths["beats_md"] = out / "beats.md"
+        paths["beats_md"].write_text(
+            _render_beats_md(beats.beats), encoding="utf-8",
+        )
 
-    paths["screenplay_md"].write_text(_render_screenplay_md(report), encoding="utf-8")
-    paths["characters_md"].write_text(_render_characters_md(report.characters), encoding="utf-8")
-    paths["beats_md"].write_text(_render_beats_md(report.beats.beats), encoding="utf-8")
+    if episode_plans is not None:
+        paths["episode_plans_json"] = out / "episode_plans.json"
+        paths["episode_plans_json"].write_text(
+            episode_plans.model_dump_json(indent=2), encoding="utf-8",
+        )
+
+    if screenplay is not None:
+        paths["screenplay_json"] = out / "screenplay.json"
+        paths["screenplay_json"].write_text(
+            screenplay.model_dump_json(indent=2), encoding="utf-8",
+        )
+        # screenplay.md 渲染需要 meta 配合(显示元信息);只在两者都有时才写
+        if meta is not None:
+            report = FinalReport(
+                screenplay=screenplay,
+                characters=characters or CharacterList(),
+                beats=beats or BeatList(),
+                meta=meta,
+            )
+            paths["screenplay_md"] = out / "screenplay.md"
+            paths["screenplay_md"].write_text(
+                _render_screenplay_md(report), encoding="utf-8",
+            )
+
+    if meta is not None:
+        paths["meta_json"] = out / "meta.json"
+        paths["meta_json"].write_text(
+            meta.model_dump_json(indent=2), encoding="utf-8",
+        )
 
     return {k: str(v) for k, v in paths.items()}
 
@@ -99,9 +150,9 @@ def _render_episode_md(ep: Episode) -> list:
     title = ep.title or f"第 {ep.index} 集"
     out.append(f"### {title}")
     out.append("")
-    total_dur = sum(s.duration_sec for s in ep.storyboards)
+    total_dur = sum(s.duration_sec for s in ep.shots)
     if total_dur > 0:
-        out.append(f"- 总时长: ≈ {total_dur:.0f} 秒 ({len(ep.storyboards)} 镜)")
+        out.append(f"- 总时长: ≈ {total_dur:.0f} 秒 ({len(ep.shots)} 镜)")
     if ep.synopsis:
         out.append("")
         out.append(f"**剧情概要**: {ep.synopsis}")
@@ -111,11 +162,11 @@ def _render_episode_md(ep: Episode) -> list:
     if ep.visual_style:
         out.append("")
         out.append(f"**视觉调性**: {ep.visual_style}")
-    if ep.storyboards:
+    if ep.shots:
         out.append("")
         out.append("| # | 镜头 | 意图 | 剧情 | 时长 | 出场 | 场景 | 画面 |")
         out.append("|---|------|------|------|------|------|------|------|")
-        for sb in ep.storyboards:
+        for sb in ep.shots:
             chars = ", ".join(sb.characters) if sb.characters else "-"
             setting = sb.setting or "-"
             desc = sb.description.replace("|", "\\|").replace("\n", " ")
@@ -125,20 +176,20 @@ def _render_episode_md(ep: Episode) -> list:
             out.append(
                 f"| {sb.index} | {shot} | {intent} | {narr} | {sb.duration_sec:.0f}s | {chars} | {setting} | {desc} |"
             )
-        if any(sb.shot_action or sb.camera_motion for sb in ep.storyboards):
+        if any(sb.shot_action or sb.camera_motion for sb in ep.shots):
             out.append("")
             out.append("**动作 / 运镜**")
             out.append("")
-            for sb in ep.storyboards:
+            for sb in ep.shots:
                 if sb.shot_action:
                     out.append(f"- 镜{sb.index} 动作: {sb.shot_action}")
                 if sb.camera_motion:
                     out.append(f"- 镜{sb.index} 运镜: {sb.camera_motion}")
-        if any(sb.dialogue or sb.voiceover for sb in ep.storyboards):
+        if any(sb.dialogue or sb.voiceover for sb in ep.shots):
             out.append("")
             out.append("**台词 / 旁白**")
             out.append("")
-            for sb in ep.storyboards:
+            for sb in ep.shots:
                 speaker = sb.speaker or "?"
                 if sb.dialogue:
                     out.append(f"- 镜{sb.index} 台词 [{speaker}]: {sb.dialogue}")

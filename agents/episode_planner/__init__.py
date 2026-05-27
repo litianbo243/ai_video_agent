@@ -2,13 +2,13 @@
 
 LLM 一次性看全部 beat 列表 + 人物档案,把相邻同弧光的 beat 聚合成"集",
 每集目标 ~target_duration_sec 秒。产物只有规划元数据(title / synopsis /
-director_intent / beat_indices),分镜由下游 ``extract_storyboard.narrate_episode``
+director_intent / beat_indices),分镜由下游 ``narrative_director.narrate_episode``
 按 ``beat_indices`` 拿对应 beat + 跨 batch 原文展开。
 
 **典型粒度**:1 个 beat ≈ 60-120 秒视频体量;目标 300s/集 → 典型 2-5 beat/集。
 
 **为什么独立成 agent**:之前 1 beat = 1 集导致镜数严重不达标(9 镜对 300s
-目标)。把"聚合"的判断从 ``extract_beats``(关心"剧情怎么切")抽到独立
+目标)。把"聚合"的判断从 ``beat_segmenter``(关心"剧情怎么切")抽到独立
 agent(关心"几个剧情段组一集"),职责更清晰,prompt 也能更专注。
 
 LLM 配置 / 客户端是 agent 自治的:配置住在 ``llm.json``,首次调用时按需

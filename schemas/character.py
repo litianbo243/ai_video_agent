@@ -1,4 +1,4 @@
-"""人物相关数据契约(``extract_characters`` agent 产出 + workflow 聚合)。
+"""人物相关数据契约(``character_profiler`` agent 产出 + workflow 聚合)。
 
 * ``CharacterDraft``      —— LLM 产出的初稿(无 ``index``)
 * ``Character``           —— 合并后完整档案(含 ``index``)

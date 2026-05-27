@@ -1,12 +1,12 @@
-"""叙事分镜相关数据契约(``extract_storyboard`` agent 产出)。
+"""叙事分镜相关数据契约(``narrative_director`` agent 产出)。
 
 * ``NarrativeShot``           —— 单镜叙事维度(LLM 直接产出)
 * ``NarrativeShotList`` —— 本集所有叙事分镜的有序清单(LLM 单次产出)
 
 **职责切分**:本 agent 写**叙事维度**(谁 / 在哪 / 说什么 / 想什么 + 集层
 ``director_intent``);**视觉维度**(景别 / 运镜 / 起始画面 / 时长)归
-``shot_director`` agent。两者按 ``index`` 配对合并成 ``Storyboard``
-(见 ``schemas/storyboard.py``)。
+``shot_director`` agent。两者按 ``index`` 配对合并成 ``Shot``
+(见 ``schemas/screenplay.py``)。
 """
 
 from __future__ import annotations

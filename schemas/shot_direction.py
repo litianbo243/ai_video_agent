@@ -5,7 +5,7 @@
 * ``ShotDirectionList``  —— 本集所有镜头的视觉指导(LLM 单次产出)
 
 每个 ``ShotDirection.index`` 与上游 ``NarrativeShot.index`` 一一对应,
-workflow 按 index 配对合并成 ``Storyboard``(见 ``schemas/storyboard.py``)。
+workflow 按 index 配对合并成 ``Shot``(见 ``schemas/screenplay.py``)。
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """batch_chapters skill 的产出类型。
 
 ``Batch`` 是 ``split_into_batches`` 的产物,也是 3 个 agent
-(``agents/extract_characters`` / ``extract_beats`` / ``extract_storyboard``)
+(``agents/character_profiler`` / ``beat_segmenter`` / ``narrative_director``)
 共享的输入契约。
 """
 

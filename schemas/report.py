@@ -1,11 +1,11 @@
-"""顶层报告契约(``skills.file_io.write_final_report`` 落盘的契约)。
+"""顶层报告契约(``skills.file_io.write_partial`` 在 SCREENPLAY mode 下的完整态)。
 
 ``FinalReport`` 是一次 run 的全部产物聚合:
-* 3 个 agent 的输出(``CharacterList`` / ``BeatList`` / ``ScreenplayAnalysis``)
+* 3 个 agent 的输出(``CharacterList`` / ``BeatList`` / ``Screenplay``)
 * 元信息(``ReportMeta``,无 LLM 调用,仅记录 input/output/llm/batch 等)
 
 **注:** 本工程不维护独立的场景视觉档案。Beat 内 ``setting_refs`` 只是字符串
-label;每镜的视觉环境由 storyboard agent 写到 ``Storyboard.description`` 里。
+label;每镜的视觉环境由 ``shot_director`` 写到 ``Shot.description`` 里。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from schemas.beat import BeatList
 from schemas.character import CharacterList
-from schemas.storyboard import ScreenplayAnalysis
+from schemas.screenplay import Screenplay
 
 
 class AgentLLMInfo(BaseModel):
@@ -46,7 +46,7 @@ class ReportMeta(BaseModel):
 class FinalReport(BaseModel):
     """最终产出:剧本 + 人物 + 节拍 + 元信息,平级。"""
 
-    screenplay: ScreenplayAnalysis
+    screenplay: Screenplay
     characters: CharacterList
     beats: BeatList
     meta: ReportMeta

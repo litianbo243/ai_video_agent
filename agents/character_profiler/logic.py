@@ -2,14 +2,14 @@
 
 主 API:
 
-* ``extract_for_batch(batch, known)`` —— 1 次 LLM 调用 + 自动合并
+* ``run_for_batch(batch, known)`` —— 1 次 LLM 调用 + 自动合并
   返回的 ``CharacterExtraction`` 仅给 trace / debug 看,正常 caller 无需读
   LLM 客户端从同包的 ``llm`` 模块按需 lazy 取,不再由 caller 注入
 
 底层 API(单测 / notebook 用):
 
 * ``merge_delta(known, delta)`` —— 单独跑合并(给手工构造的 delta 用)
-* 测试时想 mock LLM:``from agents.extract_characters import set_llm; set_llm(fake)``
+* 测试时想 mock LLM:``from agents.character_profiler import set_llm; set_llm(fake)``
 
 workflow 只负责编排(batch 循环 + LangGraph 节点),不写合并语义。
 
@@ -32,8 +32,8 @@ from skills.batch_chapters import Batch
 from schemas.character import Character, CharacterExtraction
 
 
-class CharacterExtractResult(NamedTuple):
-    """``extract_for_batch`` 的返回值。
+class CharacterProfileResult(NamedTuple):
+    """``run_for_batch`` 的返回值。
 
     可解构(``delta, renames = result``),也可字段访问。
     """
@@ -43,13 +43,13 @@ class CharacterExtractResult(NamedTuple):
 
     renames: List[Tuple[str, str]]
     """本批发生的 name 升格事件 ``[(old_name, new_name), ...]``,
-    供 caller 同步下游已生成内容(典型:``extract_beats`` 的 ``character_refs``)。"""
+    供 caller 同步下游已生成内容(典型:``beat_segmenter`` 的 ``character_refs``)。"""
 
 logger = logging.getLogger(__name__)
 
 
 get_llm, set_llm, set_trace_dir = make_agent_llm_manager(
-    agent_name="extract_characters",
+    agent_name="character_profiler",
     config_path=Path(__file__).parent / "llm.json",
 )
 
@@ -202,22 +202,22 @@ def _build_user_prompt(
     )
 
 
-def extract_for_batch(
+def run_for_batch(
     batch: Batch,
     known: Dict[str, Character],
     *,
     title: str = "",
-) -> CharacterExtractResult:
+) -> CharacterProfileResult:
     """完整处理一批:LLM 抽取 → 合并入 ``known``(in-place)。
 
-    LLM 客户端由 ``agents.extract_characters.llm.get_llm()`` lazy 提供
+    LLM 客户端由 ``agents.character_profiler.llm.get_llm()`` lazy 提供
     (配置在同包 ``llm.json``),caller 不需要传。
 
-    返回 ``CharacterExtractResult(delta, renames)``:
+    返回 ``CharacterProfileResult(delta, renames)``:
 
     * ``delta`` —— LLM 原始 delta,给 logger / trace / debug 看;默认 caller 无需读。
     * ``renames`` —— 本批发生的 name 升格事件 ``[(old_name, new_name), ...]``。
-      caller 应拿这些事件回扫下游已经生成的内容(典型:``extract_beats`` 已经
+      caller 应拿这些事件回扫下游已经生成的内容(典型:``beat_segmenter`` 已经
       锁住的 ``Beat.character_refs`` 还指向旧 name)。空列表 = 本批无升格。
 
     若想跳过自动合并(notebook 调试场景),可单独调 ``merge_delta``。
@@ -234,7 +234,7 @@ def extract_for_batch(
         batch.index, len(delta.new_or_updated_characters),
     )
     renames = merge_delta(known, delta)
-    return CharacterExtractResult(delta=delta, renames=renames)
+    return CharacterProfileResult(delta=delta, renames=renames)
 
 
 def merge_delta(
@@ -264,7 +264,7 @@ def merge_delta(
 
     Returns:
         本批发生的 name 升格事件 ``[(old_name, new_name), ...]``;空列表 = 本批无升格。
-        caller 应拿来回扫下游已生成的内容(beats / storyboards 里残留旧 name 的引用)。
+        caller 应拿来回扫下游已生成的内容(beats / shots 里残留旧 name 的引用)。
     """
     renames: List[Tuple[str, str]] = []
     for draft in delta.new_or_updated_characters:
@@ -331,8 +331,8 @@ def merge_delta(
 
 
 __all__ = [
-    "CharacterExtractResult",
+    "CharacterProfileResult",
     "SYSTEM_PROMPT",
-    "extract_for_batch",
+    "run_for_batch",
     "merge_delta",
 ]

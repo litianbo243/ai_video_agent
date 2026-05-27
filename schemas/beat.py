@@ -1,4 +1,4 @@
-"""剧情段相关数据契约(``extract_beats`` agent 产出 + workflow 聚合)。
+"""剧情段相关数据契约(``beat_segmenter`` agent 产出 + workflow 聚合)。
 
 * ``BeatDraft``      —— LLM 产出的初稿(无 ``index`` / ``related_batches``)
 * ``Beat``           —— 合并后完整段(含 ``index`` / ``related_batches``)

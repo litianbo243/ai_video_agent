@@ -1,4 +1,4 @@
-"""extract_storyboard agent:一集所含 N 段 Beat → 一集**叙事分镜**(1 次 LLM 调用)。
+"""narrative_director agent:一集所含 N 段 Beat → 一集**叙事分镜**(1 次 LLM 调用)。
 
 **职责切分**:本 agent 只管「讲什么」(intent / characters / setting /
 speaker / dialogue / voiceover + 集层 ``director_intent``),
@@ -9,16 +9,12 @@ workflow 调 ``merge_episode`` 把两份按 index 合并成完整 ``Episode``。
 ``EpisodePlan`` + 对应的 N 段 ``Beat``),不是"一段 beat"。1 集 = N 段
 beat,跨 batch 原文已自动拼接。
 
-注:agent 名仍叫 ``extract_storyboard``(对应 ``agents/`` 下统一的 ``extract_*``
-前缀),但产物已经从「完整 Storyboard」收窄为「叙事维度」,输入颗粒度也
-从 beat 升级为 episode。
-
 LLM 配置 / 客户端是 agent 自治的:配置住在 ``llm.json``,首次调用时按需
 lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
 
 公开 API::
 
-    from agents.extract_storyboard import (
+    from agents.narrative_director import (
         narrate_episode,
         merge_episode,
         DEFAULT_PREV_TAIL_K,
@@ -26,7 +22,7 @@ lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
     )
     from schemas import (
         NarrativeShot, NarrativeShotList,
-        Storyboard, Episode, ScreenplayAnalysis,
+        Shot, Episode, Screenplay,
     )
 
     set_trace_dir(out_dir)                                  # runner 顶层调一次
@@ -44,7 +40,7 @@ lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
 复位即可。
 """
 
-from agents.extract_storyboard.logic import (
+from agents.narrative_director.logic import (
     DEFAULT_PREV_TAIL_K,
     SYSTEM_PROMPT,
     get_llm,

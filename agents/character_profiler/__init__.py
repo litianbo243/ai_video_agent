@@ -1,4 +1,4 @@
-"""extract_characters agent:单批人物增量抽取 + 合并。
+"""character_profiler agent:单批人物增量抽取 + 合并。
 
 给定一批章节正文 + 已知人物表,LLM 返回本批的人物 delta,自动合并入名册。
 
@@ -7,17 +7,17 @@ lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
 
 公开 API::
 
-    from agents.extract_characters import (
-        extract_for_batch, merge_delta, CharacterExtractResult,
+    from agents.character_profiler import (
+        run_for_batch, merge_delta, CharacterProfileResult,
         get_llm, set_llm, set_trace_dir,
     )
     from schemas import Character, CharacterDraft, CharacterList, CharacterExtraction
 
     set_trace_dir(out_dir)                                 # runner 顶层调一次
-    result = extract_for_batch(batch, known_dict, title="斗破苍穹")
+    result = run_for_batch(batch, known_dict, title="斗破苍穹")
     # known_dict 已就地更新;result.delta 给 trace / debug 看;
     # result.renames 是本批 name 升格事件,caller 应回扫已锁住的 beats:
-    #   from agents.extract_beats import apply_character_renames
+    #   from agents.beat_segmenter import apply_character_renames
     #   apply_character_renames(beats_so_far, result.renames)
 
 **schema 不在本模块 re-export**:所有 Pydantic 数据契约集中在顶层 ``schemas/``
@@ -27,10 +27,10 @@ lazy build,trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。
 复位即可。
 """
 
-from agents.extract_characters.logic import (
-    CharacterExtractResult,
+from agents.character_profiler.logic import (
+    CharacterProfileResult,
     SYSTEM_PROMPT,
-    extract_for_batch,
+    run_for_batch,
     get_llm,
     merge_delta,
     set_llm,
@@ -38,9 +38,9 @@ from agents.extract_characters.logic import (
 )
 
 __all__ = [
-    "CharacterExtractResult",
+    "CharacterProfileResult",
     "SYSTEM_PROMPT",
-    "extract_for_batch",
+    "run_for_batch",
     "merge_delta",
     "get_llm",
     "set_llm",

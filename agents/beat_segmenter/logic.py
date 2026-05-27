@@ -2,12 +2,12 @@
 
 主 API:
 
-* ``extract_for_batch(batch, beats, characters, ...)``
+* ``run_for_batch(batch, beats, characters, ...)``
     1 次 LLM 调用 + 自动合并
 * ``merge_delta(beats, delta, ...)`` —— 单独跑合并(notebook / 单测用)
 
 LLM 客户端从同包 ``llm.json`` 按需 lazy 取,caller 不传。
-测试 mock:``from agents.extract_beats import set_llm; set_llm(fake)``。
+测试 mock:``from agents.beat_segmenter import set_llm; set_llm(fake)``。
 
 **跨批续写机制**:每批 LLM 必须把「最近 ``rewrite_window`` 段大纲」的最新版
 (原样复述或修订过的版本)放在 ``BeatExtraction.beats`` 列表的**前 K 项**,
@@ -19,9 +19,9 @@ LLM 客户端从同包 ``llm.json`` 按需 lazy 取,caller 不传。
 * K>=2 → LLM 修订空间更大,token 成本随 K 线性增长。
 
 **场景**:本工程不维护场景视觉档案,``Beat.setting_refs`` 只是字符串 label,
-storyboard agent 写每镜 ``description`` 时把视觉环境写到画面里。beat agent 内部
+``shot_director`` 写每镜 ``description`` 时把视觉环境写到画面里。本 agent 内部
 **不维护**跨 batch 的「场景 name 一致性池」(各 beat 独立产 setting_refs,
-跨 beat 同地点可能写成不同 name,storyboard 不在意因为它只看单 beat)。
+跨 beat 同地点可能写成不同 name,下游不在意因为它只看单 beat)。
 
 prompt 上下文:全员人物详档(name + 别名 + background + personality + arc);
 ``character_refs`` 必须从详档取 name(``merge_delta`` 做白名单 + alias 规范化)。
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # Per-agent LLM 管理(配置在同目录 ``llm.json``,首次 ``get_llm()`` 才 build)。
 # 公开三件套:``get_llm`` / ``set_llm``(测试 mock) / ``set_trace_dir``(runner 注入)。
 get_llm, set_llm, set_trace_dir = make_agent_llm_manager(
-    agent_name="extract_beats",
+    agent_name="beat_segmenter",
     config_path=Path(__file__).parent / "llm.json",
 )
 
@@ -60,8 +60,8 @@ def _normalize_character_refs(
 
     白名单 = ``characters`` 里所有 name ∪ 所有 aliases。
     LLM 在 beat 里常用原文里更生动的别名(如「老七」),需要把它们映射回详档里的
-    canonical name(如「陈德志」)再存进 ``Beat.character_refs``,保证下游(storyboard
-    等)只跟 canonical name 打交道。
+    canonical name(如「陈德志」)再存进 ``Beat.character_refs``,保证下游(分镜
+    阶段等)只跟 canonical name 打交道。
 
     * 命中 name        → 原样保留
     * 命中某 alias     → 替换为对应人物的 canonical name(debug log,不算 warn)
@@ -250,7 +250,7 @@ def _build_user_prompt(
     )
 
 
-def extract_for_batch(
+def run_for_batch(
     batch: Batch,
     beats_so_far: List[Beat],
     characters: Dict[str, Character],
@@ -411,7 +411,7 @@ def apply_character_renames(
 ) -> int:
     """把已锁住的 ``beats`` 里 ``character_refs`` 的旧 name 替换成新 name(in-place)。
 
-    场景:``extract_characters.merge_delta`` 触发 name 升格(如「老张」→「张志远」)
+    场景:``character_profiler.merge_delta`` 触发 name 升格(如「老张」→「张志远」)
     后,**此前已经产出的 beats** 仍引用旧 name。本函数遍历回扫,把旧 name 替换
     成新 name,保证 ``Beat.character_refs`` 跟 character roster 的 canonical name
     长期一致。
@@ -421,7 +421,7 @@ def apply_character_renames(
 
     Args:
         beats: 此前已生成的 beats(``beats_so_far``);此函数 in-place 修改。
-        renames: ``[(old_name, new_name), ...]``,来自 ``CharacterExtractResult.renames``。
+        renames: ``[(old_name, new_name), ...]``,来自 ``CharacterProfileResult.renames``。
 
     Returns:
         被改动 ``character_refs`` 的 beat 数量(用于日志 / 调试)。
@@ -460,7 +460,7 @@ def apply_character_renames(
 
 __all__ = [
     "apply_character_renames",
-    "extract_for_batch",
+    "run_for_batch",
     "merge_delta",
     "SYSTEM_PROMPT",
     "SYSTEM_PROMPT_TEMPLATE",

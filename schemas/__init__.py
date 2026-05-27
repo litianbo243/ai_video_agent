@@ -4,9 +4,9 @@
 * **schemas/ 是唯一来源**:agent 自己的 ``__init__.py`` 不 re-export schema,
   所有业务代码必须 ``from schemas.X import Y``,杜绝"两个真相"。
 * **每个 LLM-direct agent 一个文件**:character / beat / episode_plan /
-  narrative / shot_direction 各一份,文件名跟 agent 名对应。
-* **跨 agent 的聚合容器**(Storyboard / Episode / ScreenplayAnalysis)
-  集中放在 ``storyboard.py``,它们不属于任何单一 agent,是 workflow
+  narrative_shot / shot_direction 各一份,文件名跟该 agent 的产物对应。
+* **跨 agent 的聚合容器**(Shot / Episode / Screenplay)
+  集中放在 ``screenplay.py``,它们不属于任何单一 agent,是 workflow
   组装出来的"成品"。
 * **顶层报告契约**(FinalReport / ReportMeta / AgentLLMInfo)放
   ``report.py``,跟 ``skills.file_io`` 配套。
@@ -29,10 +29,10 @@ from schemas.character import (
     CharacterList,
 )
 from schemas.episode_plan import EpisodePlan, EpisodePlanList
-from schemas.narrative import NarrativeShot, NarrativeShotList
+from schemas.narrative_shot import NarrativeShot, NarrativeShotList
 from schemas.report import AgentLLMInfo, FinalReport, ReportMeta
 from schemas.shot_direction import ShotDirection, ShotDirectionList, ShotType
-from schemas.storyboard import Episode, ScreenplayAnalysis, Storyboard
+from schemas.screenplay import Episode, Screenplay, Shot
 
 __all__ = [
     "AgentLLMInfo",
@@ -51,9 +51,9 @@ __all__ = [
     "NarrativeShot",
     "NarrativeShotList",
     "ReportMeta",
-    "ScreenplayAnalysis",
+    "Screenplay",
     "ShotDirection",
     "ShotDirectionList",
     "ShotType",
-    "Storyboard",
+    "Shot",
 ]

@@ -1,15 +1,15 @@
 """跨 agent 聚合容器:由 workflow 编排时组装出来的"成品",非 LLM 直接产出。
 
-* ``Storyboard``         —— 单镜完整契约 = ``NarrativeShot`` ∪ ``ShotDirection``
+* ``Shot``         —— 单镜完整契约 = ``NarrativeShot`` ∪ ``ShotDirection``
 * ``Episode``            —— 一集完整契约 = ``EpisodePlan`` 元数据 +
                             ``NarrativeShotList`` 叙事调性 +
                             ``ShotDirectionList`` 视觉调性 +
-                            ``List[Storyboard]``
-* ``ScreenplayAnalysis`` —— 全本契约 = ``List[Episode]``
+                            ``List[Shot]``
+* ``Screenplay`` —— 全本契约 = ``List[Episode]``
 
 放在这里的原因:这 3 个类**跨 agent 边界**,不属于任何单一 agent
-(``Storyboard`` 字段一半来自叙事分镜师、一半来自镜头导演;``Episode`` 字段
-跨 3 个 agent;``ScreenplayAnalysis`` 是顶层聚合)。放在某个 agent 的 schema
+(``Shot`` 字段一半来自叙事分镜师、一半来自镜头导演;``Episode`` 字段
+跨 3 个 agent;``Screenplay`` 是顶层聚合)。放在某个 agent 的 schema
 下都会形成"反向 import"或归属偏置,集中放此处中立干净。
 
 LLM **不直接产出**这 3 个对象,只用于落盘 / 渲染 / 下游消费,所以字段
@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from schemas.shot_direction import ShotType
 
 
-class Storyboard(BaseModel):
+class Shot(BaseModel):
     """合并后的完整分镜(workflow 把 NarrativeShot + ShotDirection 按 index 合并而成)。
 
     LLM **不直接产出**此对象 —— 它是叙事 + 视觉两次调用的合并产物,只用于
@@ -68,12 +68,12 @@ class Episode(BaseModel):
         default="",
         description="本集视觉调性(2-3 句,镜头导演产出)",
     )
-    storyboards: List[Storyboard] = Field(
+    shots: List[Shot] = Field(
         default_factory=list, description="本集所有分镜(按时序)"
     )
 
 
-class ScreenplayAnalysis(BaseModel):
+class Screenplay(BaseModel):
     """剧本分析:全书所有分集(含分镜)的聚合。
 
     书名走 ``FinalReport.meta.title``,本类只关心分集内容。
@@ -84,6 +84,6 @@ class ScreenplayAnalysis(BaseModel):
 
 __all__ = [
     "Episode",
-    "ScreenplayAnalysis",
-    "Storyboard",
+    "Screenplay",
+    "Shot",
 ]

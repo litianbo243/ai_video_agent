@@ -1,11 +1,11 @@
 """shot_director agent:一集叙事分镜 → 一集视觉指导(1 次 LLM 调用)。
 
-输入是 ``extract_storyboard`` 出的一集 ``NarrativeShot`` 列表 + 集层
+输入是 ``narrative_director`` 出的一集 ``NarrativeShot`` 列表 + 集层
 ``director_intent``(叙事调性);本 agent 决定每镜的"怎么拍"(景别 /
 运镜 / 动作演变 / 起始画面 / 时长),并给出本集视觉调性 ``visual_style``。
 
 输出 ``ShotDirectionList``,workflow 按 ``index`` 与 ``NarrativeShot`` 一一
-配对合并成最终 ``Storyboard``。
+配对合并成最终 ``Shot``。
 
 LLM 配置 / 客户端是 agent 自治的:配置住在 ``llm.json``,首次调用 lazy build,
 trace 由顶层 runner 通过 ``set_trace_dir(out_dir)`` 注入。

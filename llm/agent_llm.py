@@ -10,7 +10,7 @@
     from llm.agent_llm import make_agent_llm_manager
 
     get_llm, set_llm, set_trace_dir = make_agent_llm_manager(
-        agent_name="extract_characters",
+        agent_name="character_profiler",
         config_path=Path(__file__).parent / "llm.json",
     )
 
